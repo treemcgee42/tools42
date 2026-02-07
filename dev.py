@@ -98,6 +98,21 @@ def build_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
         dest_bin.chmod(0o755)
 
 
+def test_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
+    bld_root = repo_root / "bld" / package
+    ensure_dir(bld_root)
+
+    cargo_toml = pkg_dir / "Cargo.toml"
+    if not cargo_toml.exists():
+        eprint(f"Cargo.toml not found: {cargo_toml}")
+        sys.exit(1)
+
+    env = os.environ.copy()
+    env["CARGO_TARGET_DIR"] = str(bld_root)
+    cmd = ["cargo", "test", "--manifest-path", str(cargo_toml)]
+    run_command(cmd, cwd=pkg_dir, env=env)
+
+
 def cmd_build(args: argparse.Namespace) -> None:
     repo_root = Path(__file__).resolve().parent
     pkg_dir = repo_root / "src" / args.package
@@ -117,6 +132,25 @@ def cmd_build(args: argparse.Namespace) -> None:
     build_rust(repo_root, args.package, pkg_dir)
 
 
+def cmd_test(args: argparse.Namespace) -> None:
+    repo_root = Path(__file__).resolve().parent
+    pkg_dir = repo_root / "src" / args.package
+
+    if not pkg_dir.exists():
+        eprint(f"package dir not found: {pkg_dir}")
+        sys.exit(1)
+
+    spec_path = pkg_dir / "tools42_build.toml"
+    spec = read_toml(spec_path)
+
+    pkg_type = spec.get("type")
+    if pkg_type != "rust":
+        eprint(f"unsupported package type: {pkg_type}")
+        sys.exit(1)
+
+    test_rust(repo_root, args.package, pkg_dir)
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="dev.py")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -124,6 +158,10 @@ def main(argv: list[str]) -> int:
     build = sub.add_parser("build", help="build a package")
     build.add_argument("package", help="package name (subdir under src/)")
     build.set_defaults(func=cmd_build)
+
+    test = sub.add_parser("test", help="test a package")
+    test.add_argument("package", help="package name (subdir under src/)")
+    test.set_defaults(func=cmd_test)
 
     args = parser.parse_args(argv)
     args.func(args)
