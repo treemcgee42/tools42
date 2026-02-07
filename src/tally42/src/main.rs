@@ -1,3 +1,4 @@
+mod manager;
 mod model;
 
 use clap::Parser;
