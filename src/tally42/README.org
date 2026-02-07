@@ -1,0 +1,32 @@
+
+* Introduction
+
+`tally42` helps introspect personal financial statements.
+
+It ingests `<statement>.toml` files to get the information. It does not currently
+persist the data elsewhere. The reasoning behind this is that statements come in a
+variety of formats and manual inspection is usually advisable anyways. Transactions
+can be written by hand during this process and are also rarely updated. The idea is
+that if you download a `statement.pdf` file from your bank you will write a companion
+`statement.toml` file. This tool can help you gain insights on all such files at
+once.
+
+* Statement toml
+
+Example:
+
+#+begin_src toml
+  account = "amex-gold"
+  statement-file = "2026-01-19.pdf"
+  closing-date = 2026-01-16
+
+  [[transaction]]
+  description = "So Gong Dong"
+  date = "2025-12-19"
+  amount = 41.64
+  category = "eating-out"
+#+end_src
+
+* Architecture
+
+TODO

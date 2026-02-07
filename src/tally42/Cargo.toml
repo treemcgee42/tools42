@@ -6,3 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rust_decimal = { version = "1.35.0", features = ["serde"] }
+serde = { version = "1.0.197", features = ["derive"] }
+time = { version = "0.3.36", features = ["serde", "parsing"] }
+toml = "0.8.19"
