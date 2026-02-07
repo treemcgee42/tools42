@@ -1,21 +1,21 @@
 mod model;
 
+use clap::Parser;
 use model::Statement;
 use std::env;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+#[derive(Parser, Debug)]
+#[command(name = "tally42")]
+#[command(about = "Introspect personal financial statements", long_about = None)]
+struct Args {
+    #[arg(short, long, help = "Print per-file load details")]
+    verbose: bool,
+}
+
 fn main() {
-    let mut verbose = false;
-    for arg in env::args().skip(1) {
-        match arg.as_str() {
-            "-v" | "--verbose" => verbose = true,
-            _ => {
-                eprintln!("error: unknown argument: {arg}");
-                std::process::exit(1);
-            }
-        }
-    }
+    let args = Args::parse();
 
     let workdir = match env::var("TALLY42_WORKDIR") {
         Ok(val) => PathBuf::from(val),
@@ -55,7 +55,7 @@ fn main() {
         match toml::from_str::<Statement>(&content) {
             Ok(stmt) => {
                 loaded += 1;
-                if verbose {
+                if args.verbose {
                     eprintln!(
                         "loaded: {} (account={}, closing-date={})",
                         path.display(),
@@ -71,7 +71,7 @@ fn main() {
         }
     }
 
-    if verbose {
+    if args.verbose {
         eprintln!("loaded {loaded} statements with {errors} warnings");
     }
 }

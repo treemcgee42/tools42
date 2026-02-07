@@ -11,3 +11,4 @@ serde = { version = "1.0.197", features = ["derive"] }
 time = { version = "0.3.36", features = ["serde", "parsing"] }
 toml = "0.8.19"
 walkdir = "2.5.0"
+clap = { version = "4.5.31", features = ["derive"] }
