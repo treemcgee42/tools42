@@ -30,3 +30,63 @@ Example:
 * Architecture
 
 TODO
+
+* Philosophy
+
+** Double-entry accounting as an implementation detail
+
+We believe double-entry accounting is extremely robust, even on the scale of
+personal finances. While it is a great technical tool, a general-purpose
+personal finance system should not expect its users to interact with or even
+understand it.
+
+** Statements: how we ingest financial data
+
+Statements, e.g. bank, credit card, brokerage, are the primary way financial
+institutions communicate our financial delta over a time period. All such
+institutions should provide these in PDF form, while CSV export is not available
+accross the board nor is its structure standardized. Services like Plaid offer direct
+communication with many institutions, and a common API / structure to the
+data. However nothing is quite as reliable as a statement.
+
+We also believe that it is important for people to not only save their statements
+(and not rely on the institution to preserve them indefinitely), but to manually
+inspect them as well. For most individuals this is feasible and affords deeper
+understanding of one's finances.
+
+With all of that said, a statement, consisting of transactions, is a fundamental
+concept in tally42.
+
+** Designed with expense-splitting in mind
+
+TODO
+
+* Data
+
+tally42 stores user data in a predictable, configurable place, in compliance with the
+[[https://specifications.freedesktop.org/basedir/latest/][XDG Base Directory Specification]]. In order of precedence:
+- User configuration
+- ~$XDG_DATA_HOME/tally42~
+- ~$HOME/.local/share~
+
+Users typically need not work with this data directly, but we include an overview
+for documentation and transparency. The structure is like this:
+#+begin_src
+- tally42.db
+- statements/
+#+end_src
+
+** Statements
+
+As discussed in the philosophy section, financial documents, such as statements,
+often serve as the "source of truth" for transactions. Legally and otherwise. As
+such, it is essential for tally42 to not only be able to tie transactions to
+documents, but also for that link and indeed that document to be preserved. In
+practice, this means tally42 needs to own and reference copies of these documents.
+
+Statements are copied to the ~statements/~ data subdirectory. They are named
+according to the ID they are assigned in the DB (see the DB section for more
+details).
+
+* DB schema
+
