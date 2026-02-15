@@ -1,0 +1,17 @@
+#+title tli42
+
+* Introduction: CLIs and REPLs
+
+Many programs expose a CLI as their main mode of interaction. It's portable,
+predictable, and usable by other programs. Indeed, for one-line commands it's hard to
+beat.
+
+But the second you want to do multiple commands the limitations start to show:
+- Long command prefixes remain the same between invocations.
+- Ephemeral state can't really persist unless it's written to disk.
+- The program is starting up from scratch each time.
+
+The classic solution to this is of course a REPL. Indeed we often work with shells
+inside their REPL.
+
+tli42 is a tool to help users create REPLs as easily as they might create a CLI.
