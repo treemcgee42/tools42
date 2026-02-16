@@ -3,15 +3,15 @@ use std::collections::HashMap;
 type InternedStringType = u32;
 
 struct  StringInterner {
-    next_interned_value: InternedStringType,
     string_to_interned_value: HashMap<String, InternedStringType>,
+    interned_value_to_string: Vec<String>,
 }
 
 impl StringInterner {
     pub fn new() -> Self {
         Self {
-            next_interned_value: 0,
             string_to_interned_value: HashMap::new(),
+            interned_value_to_string: Vec::new(),
         }
     }
 
@@ -19,14 +19,22 @@ impl StringInterner {
         if let Some(interned_value) = self.string_to_interned_value.get(s) {
             *interned_value
         } else {
-            self.string_to_interned_value.insert(s.to_string(), self.next_interned_value);
-            self.next_interned_value += 1;
-            self.next_interned_value - 1
+            let interned_value = self.interned_value_to_string.len() as InternedStringType;
+            self.interned_value_to_string.push(s.to_string());
+            self.string_to_interned_value
+                .insert(s.to_string(), interned_value);
+            interned_value
         }
     }
 
     pub fn get_interned(&self, s: &str) -> Option<InternedStringType> {
         self.string_to_interned_value.get(s).copied()
+    }
+
+    pub fn resolve(&self, id: InternedStringType) -> Option<&str> {
+        self.interned_value_to_string
+            .get(id as usize)
+            .map(String::as_str)
     }
 }
 
@@ -130,8 +138,8 @@ mod string_interner_tests {
         let second = interner.intern("alpha");
 
         assert_eq!(first, second);
-        assert_eq!(interner.next_interned_value, 1);
         assert_eq!(interner.string_to_interned_value.len(), 1);
+        assert_eq!(interner.interned_value_to_string.len(), 1);
     }
 
     #[test]
@@ -144,20 +152,20 @@ mod string_interner_tests {
         assert_eq!(alpha, 0);
         assert_eq!(beta, 1);
         assert_eq!(gamma, 2);
-        assert_eq!(interner.next_interned_value, 3);
         assert_eq!(interner.string_to_interned_value.len(), 3);
+        assert_eq!(interner.interned_value_to_string.len(), 3);
     }
 
     #[test]
     fn interning_existing_string_does_not_advance_counter() {
         let mut interner = StringInterner::new();
         let first = interner.intern("repeat");
-        let after_first = interner.next_interned_value;
+        let after_first = interner.interned_value_to_string.len();
         let second = interner.intern("repeat");
 
         assert_eq!(first, second);
         assert_eq!(after_first, 1);
-        assert_eq!(interner.next_interned_value, after_first);
+        assert_eq!(interner.interned_value_to_string.len(), after_first);
     }
 
     #[test]
@@ -170,7 +178,7 @@ mod string_interner_tests {
         assert_ne!(plain, padded);
         assert_ne!(plain, with_newline);
         assert_ne!(padded, with_newline);
-        assert_eq!(interner.next_interned_value, 3);
+        assert_eq!(interner.interned_value_to_string.len(), 3);
     }
 
     #[test]
@@ -180,6 +188,40 @@ mod string_interner_tests {
 
         assert_eq!(interner.get_interned("known"), Some(0));
         assert_eq!(interner.get_interned("unknown"), None);
+    }
+
+    #[test]
+    fn resolve_returns_original_string_for_valid_id() {
+        let mut interner = StringInterner::new();
+        let alpha = interner.intern("alpha");
+        let beta = interner.intern("beta");
+
+        assert_eq!(interner.resolve(alpha), Some("alpha"));
+        assert_eq!(interner.resolve(beta), Some("beta"));
+    }
+
+    #[test]
+    fn resolve_returns_none_for_unknown_id() {
+        let mut interner = StringInterner::new();
+        interner.intern("alpha");
+
+        assert_eq!(interner.resolve(1), None);
+        assert_eq!(interner.resolve(42), None);
+    }
+
+    #[test]
+    fn intern_get_and_resolve_are_consistent() {
+        let mut interner = StringInterner::new();
+        interner.intern("alpha");
+        interner.intern("beta");
+        interner.intern("gamma");
+
+        for token in ["alpha", "beta", "gamma"] {
+            let id = interner
+                .get_interned(token)
+                .expect("token should have been interned");
+            assert_eq!(interner.resolve(id), Some(token));
+        }
     }
 }
 
