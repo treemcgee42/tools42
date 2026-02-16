@@ -1,11 +1,90 @@
+use include_dir::{include_dir, Dir};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+
+pub static EMBEDDED_MIGRATIONS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+pub enum MigrationsDir {
+    Embedded(&'static Dir<'static>),
+    Fs(PathBuf),
+}
+
+impl MigrationsDir {
+    pub fn embedded() -> Self {
+        Self::Embedded(&EMBEDDED_MIGRATIONS_DIR)
+    }
+
+    pub fn fs(path: impl AsRef<Path>) -> Self {
+        Self::Fs(path.as_ref().to_path_buf())
+    }
+
+    pub fn migration_files(&self) -> Result<Vec<String>, MigrationDiscoveryError> {
+        match self {
+            Self::Embedded(dir) => {
+                let mut files = Vec::new();
+                for file in dir.files() {
+                    let path_str = file
+                        .path()
+                        .to_str()
+                        .ok_or(MigrationDiscoveryError::InvalidUtf8FileName)?;
+                    if !path_str.ends_with(".sql") {
+                        continue;
+                    }
+                    files.push(path_str.to_string());
+                }
+                Ok(files)
+            }
+            Self::Fs(base_dir) => {
+                let mut files = Vec::new();
+                for entry in std::fs::read_dir(base_dir).map_err(MigrationDiscoveryError::Io)? {
+                    let entry = entry.map_err(MigrationDiscoveryError::Io)?;
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let is_sql = path
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| ext.eq_ignore_ascii_case("sql"))
+                        .unwrap_or(false);
+                    if !is_sql {
+                        continue;
+                    }
+                    let file_name = entry
+                        .file_name()
+                        .into_string()
+                        .map_err(|_| MigrationDiscoveryError::InvalidUtf8FileName)?;
+                    files.push(file_name);
+                }
+                Ok(files)
+            }
+        }
+    }
+
+    pub fn read_file_utf8(&self, file_name: &str) -> Result<String, MigrationContentError> {
+        match self {
+            Self::Embedded(dir) => {
+                let file = dir
+                    .get_file(file_name)
+                    .ok_or_else(|| MigrationContentError::MissingEmbeddedFile(file_name.into()))?;
+                let content = file.contents_utf8().ok_or_else(|| {
+                    MigrationContentError::NonUtf8EmbeddedFile(file_name.into())
+                })?;
+                Ok(content.to_string())
+            }
+            Self::Fs(base_dir) => {
+                let path = base_dir.join(file_name);
+                std::fs::read_to_string(path).map_err(MigrationContentError::Io)
+            }
+        }
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Migration {
     pub version: u32,
     pub name: String,
-    pub file_path: PathBuf,
+    pub file_name: String,
 }
 
 #[derive(Debug)]
@@ -34,27 +113,25 @@ pub enum MigrationDiscoveryError {
     Io(std::io::Error),
     Parse(MigrationParseError),
     DuplicateVersion(u32),
+    InvalidUtf8FileName,
 }
 
 impl Display for MigrationDiscoveryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "failed to discover migrations from directory: {err}"),
-            Self::Parse(err) => write!(f, "failed to parse migration file: {err}"),
+            Self::Io(err) => write!(f, "failed to discover migrations from source: {err}"),
+            Self::Parse(err) => write!(f, "failed to parse migration filename: {err}"),
             Self::DuplicateVersion(version) => {
                 write!(f, "duplicate migration version found: {version}")
+            }
+            Self::InvalidUtf8FileName => {
+                write!(f, "migration file name must be valid utf-8")
             }
         }
     }
 }
 
 impl std::error::Error for MigrationDiscoveryError {}
-
-impl From<std::io::Error> for MigrationDiscoveryError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
-    }
-}
 
 impl From<MigrationParseError> for MigrationDiscoveryError {
     fn from(value: MigrationParseError) -> Self {
@@ -63,15 +140,38 @@ impl From<MigrationParseError> for MigrationDiscoveryError {
 }
 
 #[derive(Debug)]
-pub enum MigrationRunnerError {
+pub enum MigrationContentError {
     Io(std::io::Error),
+    MissingEmbeddedFile(String),
+    NonUtf8EmbeddedFile(String),
+}
+
+impl Display for MigrationContentError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "failed to read migration sql content: {err}"),
+            Self::MissingEmbeddedFile(file_name) => {
+                write!(f, "embedded migration file not found: {file_name}")
+            }
+            Self::NonUtf8EmbeddedFile(file_name) => {
+                write!(f, "embedded migration file is not valid utf-8: {file_name}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MigrationContentError {}
+
+#[derive(Debug)]
+pub enum MigrationRunnerError {
+    Content(MigrationContentError),
     Sql(rusqlite::Error),
 }
 
 impl Display for MigrationRunnerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "failed to read migration sql: {err}"),
+            Self::Content(err) => write!(f, "failed to load migration content: {err}"),
             Self::Sql(err) => write!(f, "sqlite error while running migrations: {err}"),
         }
     }
@@ -79,9 +179,9 @@ impl Display for MigrationRunnerError {
 
 impl std::error::Error for MigrationRunnerError {}
 
-impl From<std::io::Error> for MigrationRunnerError {
-    fn from(value: std::io::Error) -> Self {
-        Self::Io(value)
+impl From<MigrationContentError> for MigrationRunnerError {
+    fn from(value: MigrationContentError) -> Self {
+        Self::Content(value)
     }
 }
 
@@ -96,8 +196,8 @@ pub struct MigrationRunner<'conn> {
 }
 
 impl Migration {
-    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, MigrationParseError> {
-        let path = path.as_ref();
+    pub fn from_file_name(file_name: &str) -> Result<Self, MigrationParseError> {
+        let path = Path::new(file_name);
         let is_sql = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -118,45 +218,27 @@ impl Migration {
             return Err(MigrationParseError::InvalidFilename);
         }
 
-        // Parse u32 directly so zero-padded versions are naturally accepted.
         let version = version_str
             .parse::<u32>()
             .map_err(MigrationParseError::InvalidVersion)?;
         Ok(Self {
             version,
             name: name.to_string(),
-            file_path: path.to_path_buf(),
+            file_name: file_name.to_string(),
         })
     }
 
-    pub fn sql(&self) -> Result<String, std::io::Error> {
-        std::fs::read_to_string(&self.file_path)
-    }
-
-    pub fn from_dir(dir: impl AsRef<Path>) -> Result<Vec<Self>, MigrationDiscoveryError> {
+    pub fn from_source(source: &MigrationsDir) -> Result<Vec<Self>, MigrationDiscoveryError> {
         let mut migrations = Vec::new();
-
-        for entry in std::fs::read_dir(dir).map_err(MigrationDiscoveryError::from)? {
-            let entry = entry.map_err(MigrationDiscoveryError::from)?;
-            let path = entry.path();
-            let is_sql = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| ext.eq_ignore_ascii_case("sql"))
-                .unwrap_or(false);
-            if !is_sql {
-                continue;
-            }
-
-            let migration = Self::from_file(&path).map_err(MigrationDiscoveryError::from)?;
-            migrations.push(migration);
+        for file_name in source.migration_files()? {
+            migrations.push(Self::from_file_name(&file_name)?);
         }
 
         migrations.sort_by(|a, b| {
             a.version
                 .cmp(&b.version)
                 .then_with(|| a.name.cmp(&b.name))
-                .then_with(|| a.file_path.cmp(&b.file_path))
+                .then_with(|| a.file_name.cmp(&b.file_name))
         });
 
         for pair in migrations.windows(2) {
@@ -167,6 +249,10 @@ impl Migration {
 
         Ok(migrations)
     }
+
+    pub fn sql(&self, source: &MigrationsDir) -> Result<String, MigrationContentError> {
+        source.read_file_utf8(&self.file_name)
+    }
 }
 
 impl<'conn> MigrationRunner<'conn> {
@@ -174,7 +260,11 @@ impl<'conn> MigrationRunner<'conn> {
         Self { conn }
     }
 
-    pub fn run(&self, migrations: &[Migration]) -> Result<(), MigrationRunnerError> {
+    pub fn run(
+        &self,
+        source: &MigrationsDir,
+        migrations: &[Migration],
+    ) -> Result<(), MigrationRunnerError> {
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -195,7 +285,7 @@ impl<'conn> MigrationRunner<'conn> {
                 continue;
             }
 
-            let sql = migration.sql().map_err(MigrationRunnerError::from)?;
+            let sql = migration.sql(source)?;
             self.conn.execute_batch(&sql)?;
             self.conn.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?1, ?2)",
@@ -214,65 +304,76 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn from_file_parses_zero_padded_version() {
-        let temp_dir = tempdir().expect("create temp dir");
-        let path = temp_dir.path().join("0001_create_accounts.sql");
-        let sql = "CREATE TABLE accounts(id INTEGER PRIMARY KEY);";
-        std::fs::write(&path, sql).expect("write migration");
-
-        let migration = Migration::from_file(&path).expect("parse migration");
-
-        assert_eq!(migration.version, 1);
-        assert_eq!(migration.name, "create_accounts");
-        assert_eq!(migration.file_path, path);
+    fn embedded_source_lists_seed_file() {
+        let source = MigrationsDir::embedded();
+        let files = source.migration_files().expect("list embedded migration files");
+        assert!(files.contains(&"0001_add_accounts_table.sql".to_string()));
     }
 
     #[test]
-    fn from_file_rejects_non_sql_extension() {
-        let temp_dir = tempdir().expect("create temp dir");
-        let path = temp_dir.path().join("0001_create_accounts.txt");
-        std::fs::write(&path, "SELECT 1;").expect("write migration");
+    fn from_file_name_parses_zero_padded_version() {
+        let migration = Migration::from_file_name("0001_create_accounts.sql")
+            .expect("parse migration file name");
+        assert_eq!(migration.version, 1);
+        assert_eq!(migration.name, "create_accounts");
+        assert_eq!(migration.file_name, "0001_create_accounts.sql");
+    }
 
-        let err =
-            Migration::from_file(&path).expect_err("non-sql migration extension should fail");
-
+    #[test]
+    fn from_file_name_rejects_non_sql_extension() {
+        let err = Migration::from_file_name("0001_create_accounts.txt")
+            .expect_err("non-sql migration extension should fail");
         assert!(matches!(err, MigrationParseError::InvalidExtension));
     }
 
     #[test]
-    fn sql_reads_on_demand() {
+    fn sql_reads_on_demand_from_fs_source() {
         let temp_dir = tempdir().expect("create temp dir");
         let path = temp_dir.path().join("0001_create_accounts.sql");
         let sql = "CREATE TABLE accounts(id INTEGER PRIMARY KEY);";
         std::fs::write(&path, sql).expect("write migration");
 
-        let migration = Migration::from_file(&path).expect("parse migration");
-        let loaded_sql = migration.sql().expect("read migration sql");
+        let source = MigrationsDir::fs(temp_dir.path());
+        let migration = Migration::from_file_name("0001_create_accounts.sql")
+            .expect("parse migration file name");
+        let loaded_sql = migration.sql(&source).expect("read migration sql");
 
         assert_eq!(loaded_sql, sql);
     }
 
     #[test]
-    fn from_dir_returns_sorted_migrations() {
+    fn sql_reads_from_embedded_source() {
+        let source = MigrationsDir::embedded();
+        let migration = Migration::from_file_name("0001_add_accounts_table.sql")
+            .expect("parse migration file name");
+        let loaded_sql = migration.sql(&source).expect("read embedded migration sql");
+
+        assert!(loaded_sql.contains("CREATE TABLE accounts"));
+    }
+
+    #[test]
+    fn from_source_returns_sorted_migrations() {
         let temp_dir = tempdir().expect("create temp dir");
         let dir = temp_dir.path();
         std::fs::write(dir.join("0010_ten.sql"), "SELECT 10;").expect("write migration");
         std::fs::write(dir.join("0002_two.sql"), "SELECT 2;").expect("write migration");
         std::fs::write(dir.join("0001_one.sql"), "SELECT 1;").expect("write migration");
 
-        let migrations = Migration::from_dir(dir).expect("discover migrations");
+        let source = MigrationsDir::fs(dir);
+        let migrations = Migration::from_source(&source).expect("discover migrations");
         let versions: Vec<u32> = migrations.into_iter().map(|m| m.version).collect();
 
         assert_eq!(versions, vec![1, 2, 10]);
     }
 
     #[test]
-    fn from_dir_fails_on_invalid_sql_filename() {
+    fn from_source_fails_on_invalid_sql_filename() {
         let temp_dir = tempdir().expect("create temp dir");
         let dir = temp_dir.path();
         std::fs::write(dir.join("not-a-migration.sql"), "SELECT 1;").expect("write migration");
 
-        let err = Migration::from_dir(dir).expect_err("invalid migration filename should fail");
+        let source = MigrationsDir::fs(dir);
+        let err = Migration::from_source(&source).expect_err("invalid migration filename");
 
         assert!(matches!(
             err,
@@ -281,13 +382,14 @@ mod tests {
     }
 
     #[test]
-    fn from_dir_fails_on_duplicate_version() {
+    fn from_source_fails_on_duplicate_version() {
         let temp_dir = tempdir().expect("create temp dir");
         let dir = temp_dir.path();
         std::fs::write(dir.join("0001_first.sql"), "SELECT 1;").expect("write migration");
         std::fs::write(dir.join("1_second.sql"), "SELECT 2;").expect("write migration");
 
-        let err = Migration::from_dir(dir).expect_err("duplicate versions should fail");
+        let source = MigrationsDir::fs(dir);
+        let err = Migration::from_source(&source).expect_err("duplicate versions should fail");
 
         assert!(matches!(err, MigrationDiscoveryError::DuplicateVersion(1)));
     }
@@ -296,9 +398,10 @@ mod tests {
     fn run_creates_schema_migrations_table_and_is_idempotent() {
         let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
         let runner = MigrationRunner::new(&conn);
+        let source = MigrationsDir::fs(tempdir().expect("create temp dir").path());
 
-        runner.run(&[]).expect("first run should succeed");
-        runner.run(&[]).expect("second run should also succeed");
+        runner.run(&source, &[]).expect("first run should succeed");
+        runner.run(&source, &[]).expect("second run should succeed");
 
         let table_name: String = conn
             .query_row(
@@ -329,8 +432,9 @@ mod tests {
         )
         .expect("write migration");
 
-        let migrations = Migration::from_dir(dir).expect("discover migrations");
-        runner.run(&migrations).expect("run migrations");
+        let source = MigrationsDir::fs(dir);
+        let migrations = Migration::from_source(&source).expect("discover migrations");
+        runner.run(&source, &migrations).expect("run migrations");
 
         let applied_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
@@ -368,14 +472,40 @@ mod tests {
             "CREATE TABLE accounts(id INTEGER PRIMARY KEY);",
         )
         .expect("write migration");
-        let migrations = Migration::from_dir(dir).expect("discover migrations");
 
-        runner.run(&migrations).expect("first run");
-        runner.run(&migrations).expect("second run");
+        let source = MigrationsDir::fs(dir);
+        let migrations = Migration::from_source(&source).expect("discover migrations");
+
+        runner.run(&source, &migrations).expect("first run");
+        runner.run(&source, &migrations).expect("second run");
 
         let applied_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count applied migrations");
         assert_eq!(applied_count, 1);
+    }
+
+    #[test]
+    fn run_applies_embedded_migrations() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+        let source = MigrationsDir::embedded();
+        let migrations = Migration::from_source(&source).expect("discover embedded migrations");
+
+        runner.run(&source, &migrations).expect("run embedded migrations");
+
+        let applied_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .expect("count applied migrations");
+        assert_eq!(applied_count, 1);
+
+        let accounts_exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check accounts table");
+        assert_eq!(accounts_exists, 1);
     }
 }
