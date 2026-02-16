@@ -64,18 +64,26 @@ impl From<MigrationParseError> for MigrationDiscoveryError {
 
 #[derive(Debug)]
 pub enum MigrationRunnerError {
+    Io(std::io::Error),
     Sql(rusqlite::Error),
 }
 
 impl Display for MigrationRunnerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Io(err) => write!(f, "failed to read migration sql: {err}"),
             Self::Sql(err) => write!(f, "sqlite error while running migrations: {err}"),
         }
     }
 }
 
 impl std::error::Error for MigrationRunnerError {}
+
+impl From<std::io::Error> for MigrationRunnerError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value)
+    }
+}
 
 impl From<rusqlite::Error> for MigrationRunnerError {
     fn from(value: rusqlite::Error) -> Self {
@@ -166,7 +174,7 @@ impl<'conn> MigrationRunner<'conn> {
         Self { conn }
     }
 
-    pub fn run(&self, _migrations: &[Migration]) -> Result<(), MigrationRunnerError> {
+    pub fn run(&self, migrations: &[Migration]) -> Result<(), MigrationRunnerError> {
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -176,6 +184,24 @@ impl<'conn> MigrationRunner<'conn> {
             );
             ",
         )?;
+
+        for migration in migrations {
+            let already_applied = self.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+                [migration.version],
+                |row| row.get::<_, i64>(0),
+            )? != 0;
+            if already_applied {
+                continue;
+            }
+
+            let sql = migration.sql().map_err(MigrationRunnerError::from)?;
+            self.conn.execute_batch(&sql)?;
+            self.conn.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?1, ?2)",
+                rusqlite::params![migration.version, migration.name],
+            )?;
+        }
 
         Ok(())
     }
@@ -283,5 +309,73 @@ mod tests {
             .expect("schema_migrations table should exist");
 
         assert_eq!(table_name, "schema_migrations");
+    }
+
+    #[test]
+    fn run_applies_new_migrations_and_records_them() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+        let temp_dir = tempdir().expect("create temp dir");
+        let dir = temp_dir.path();
+
+        std::fs::write(
+            dir.join("0001_create_accounts.sql"),
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY);",
+        )
+        .expect("write migration");
+        std::fs::write(
+            dir.join("0002_create_transactions.sql"),
+            "CREATE TABLE transactions(id INTEGER PRIMARY KEY, account_id INTEGER NOT NULL);",
+        )
+        .expect("write migration");
+
+        let migrations = Migration::from_dir(dir).expect("discover migrations");
+        runner.run(&migrations).expect("run migrations");
+
+        let applied_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .expect("count applied migrations");
+        assert_eq!(applied_count, 2);
+
+        let accounts_exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='accounts')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check accounts table");
+        assert_eq!(accounts_exists, 1);
+
+        let transactions_exists: i64 = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='transactions')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("check transactions table");
+        assert_eq!(transactions_exists, 1);
+    }
+
+    #[test]
+    fn run_is_idempotent_for_applied_migrations() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+        let temp_dir = tempdir().expect("create temp dir");
+        let dir = temp_dir.path();
+
+        std::fs::write(
+            dir.join("0001_create_accounts.sql"),
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY);",
+        )
+        .expect("write migration");
+        let migrations = Migration::from_dir(dir).expect("discover migrations");
+
+        runner.run(&migrations).expect("first run");
+        runner.run(&migrations).expect("second run");
+
+        let applied_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .expect("count applied migrations");
+        assert_eq!(applied_count, 1);
     }
 }
