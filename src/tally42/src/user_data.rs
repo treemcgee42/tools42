@@ -14,6 +14,7 @@ pub struct UserDataManager {
 pub enum UserDataError {
     MissingHomeDir,
     CreateDataDir(std::io::Error),
+    DeleteDatabase(std::io::Error),
     OpenDatabase(rusqlite::Error),
 }
 
@@ -25,6 +26,7 @@ impl Display for UserDataError {
                 "could not resolve user data directory: HOME is not set and XDG_DATA_HOME is absent"
             ),
             Self::CreateDataDir(err) => write!(f, "failed to create data directory: {err}"),
+            Self::DeleteDatabase(err) => write!(f, "failed to delete sqlite database: {err}"),
             Self::OpenDatabase(err) => write!(f, "failed to open sqlite database: {err}"),
         }
     }
@@ -51,6 +53,14 @@ impl UserDataManager {
         // at the end of this function scope.
         rusqlite::Connection::open(&self.db_path).map_err(UserDataError::OpenDatabase)?;
         Ok(())
+    }
+
+    pub fn delete_db(&self) -> Result<bool, UserDataError> {
+        match std::fs::remove_file(&self.db_path) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(UserDataError::DeleteDatabase(err)),
+        }
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -103,5 +113,30 @@ mod tests {
 
         assert!(manager.data_dir().is_dir());
         assert!(manager.db_path().is_file());
+    }
+
+    #[test]
+    fn delete_db_removes_existing_file() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let manager = UserDataManager::from_data_dir(&data_dir);
+        manager.init().expect("init db");
+        assert!(manager.db_path().is_file());
+
+        let deleted = manager.delete_db().expect("delete db");
+
+        assert!(deleted);
+        assert!(!manager.db_path().exists());
+    }
+
+    #[test]
+    fn delete_db_is_idempotent_when_missing() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let manager = UserDataManager::from_data_dir(&data_dir);
+
+        let deleted = manager.delete_db().expect("delete missing db");
+
+        assert!(!deleted);
     }
 }

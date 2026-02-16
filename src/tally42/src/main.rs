@@ -5,6 +5,7 @@ mod user_data;
 
 use clap::{Parser, Subcommand};
 use manager::StatementManager;
+use migration::{Migration, MigrationRunner, MigrationsDir};
 use model::Statement;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -27,32 +28,79 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    Init,
     Summary {
         #[arg(long, value_name = "YYYY-MM-DD", help = "Start date (inclusive)")]
         from: Option<String>,
         #[arg(long, value_name = "YYYY-MM-DD", help = "End date (inclusive)")]
         to: Option<String>,
     },
+    DeleteDb,
 }
 
 fn main() {
-    init_user_data_or_exit();
     let args = Args::parse();
+    let user_data_manager = user_data_manager_or_exit();
 
     match args.command {
-        Command::Summary { from, to } => run_summary(args.verbose, from, to),
+        Command::Init => init_command_or_exit(&user_data_manager),
+        Command::Summary { from, to } => {
+            init_user_data_or_exit(&user_data_manager);
+            run_summary(args.verbose, from, to)
+        }
+        Command::DeleteDb => delete_db_or_exit(&user_data_manager),
     }
 }
 
-fn init_user_data_or_exit() {
-    let manager = UserDataManager::from_environment().unwrap_or_else(|err| {
+fn user_data_manager_or_exit() -> UserDataManager {
+    UserDataManager::from_environment().unwrap_or_else(|err| {
         eprintln!("error: failed to resolve user data directory: {err}");
         std::process::exit(1);
-    });
+    })
+}
+
+fn init_user_data_or_exit(manager: &UserDataManager) {
     manager.init().unwrap_or_else(|err| {
         eprintln!("error: failed to initialize user data: {err}");
         std::process::exit(1);
     });
+}
+
+fn init_command_or_exit(manager: &UserDataManager) {
+    init_user_data_or_exit(manager);
+    run_embedded_migrations_or_exit(manager);
+    println!("initialized database at {}", manager.db_path().display());
+}
+
+fn run_embedded_migrations_or_exit(manager: &UserDataManager) {
+    let conn = rusqlite::Connection::open(manager.db_path()).unwrap_or_else(|err| {
+        eprintln!(
+            "error: failed to open database for migrations ({}): {err}",
+            manager.db_path().display()
+        );
+        std::process::exit(1);
+    });
+    let source = MigrationsDir::embedded();
+    let migrations = Migration::from_source(&source).unwrap_or_else(|err| {
+        eprintln!("error: failed to discover embedded migrations: {err}");
+        std::process::exit(1);
+    });
+    let runner = MigrationRunner::new(&conn);
+    runner.run(&source, &migrations).unwrap_or_else(|err| {
+        eprintln!("error: failed to run embedded migrations: {err}");
+        std::process::exit(1);
+    });
+}
+
+fn delete_db_or_exit(manager: &UserDataManager) {
+    match manager.delete_db() {
+        Ok(true) => println!("deleted database at {}", manager.db_path().display()),
+        Ok(false) => println!("database not found at {}", manager.db_path().display()),
+        Err(err) => {
+            eprintln!("error: failed to delete database: {err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn is_toml_file(path: &Path) -> bool {
