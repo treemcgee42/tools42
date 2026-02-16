@@ -1,6 +1,7 @@
 mod manager;
 mod migration;
 mod model;
+mod user_data;
 
 use clap::{Parser, Subcommand};
 use manager::StatementManager;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use time::Date;
+use user_data::UserDataManager;
 use walkdir::WalkDir;
 
 #[derive(Parser, Debug)]
@@ -34,11 +36,23 @@ enum Command {
 }
 
 fn main() {
+    init_user_data_or_exit();
     let args = Args::parse();
 
     match args.command {
         Command::Summary { from, to } => run_summary(args.verbose, from, to),
     }
+}
+
+fn init_user_data_or_exit() {
+    let manager = UserDataManager::from_environment().unwrap_or_else(|err| {
+        eprintln!("error: failed to resolve user data directory: {err}");
+        std::process::exit(1);
+    });
+    manager.init().unwrap_or_else(|err| {
+        eprintln!("error: failed to initialize user data: {err}");
+        std::process::exit(1);
+    });
 }
 
 fn is_toml_file(path: &Path) -> bool {
