@@ -1,4 +1,5 @@
 mod manager;
+mod migration;
 mod model;
 
 use clap::{Parser, Subcommand};
