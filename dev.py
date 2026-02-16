@@ -82,8 +82,11 @@ def build_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
 
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(bld_root)
+    env["RUSTFLAGS"] = (
+        f'{env.get("RUSTFLAGS", "")} --remap-path-prefix src={pkg_dir / "src"}'
+    ).strip()
     cmd = ["cargo", "build", "--manifest-path", str(cargo_toml)]
-    run_command(cmd, cwd=pkg_dir, env=env)
+    run_command(cmd, cwd=repo_root, env=env)
 
     exe_suffix = ".exe" if os.name == "nt" else ""
     built_bin = bld_root / "debug" / f"{bin_name}{exe_suffix}"
@@ -109,8 +112,11 @@ def test_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
 
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(bld_root)
+    env["RUSTFLAGS"] = (
+        f'{env.get("RUSTFLAGS", "")} --remap-path-prefix src={pkg_dir / "src"}'
+    ).strip()
     cmd = ["cargo", "test", "--manifest-path", str(cargo_toml)]
-    run_command(cmd, cwd=pkg_dir, env=env)
+    run_command(cmd, cwd=repo_root, env=env)
 
 
 def cmd_build(args: argparse.Namespace) -> None:
