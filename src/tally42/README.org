@@ -90,3 +90,19 @@ details).
 
 * DB schema
 
+** schema_migrations
+
+`tally42` tracks applied DB migrations in ~schema_migrations~.
+
+#+begin_src sql
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+#+end_src
+
+Column semantics:
+- ~version~: Monotonic migration version number.
+- ~name~: Migration name from the filename (e.g. ~0001_create_accounts.sql~).
+- ~applied_at~: UTC timestamp when the migration row is inserted.

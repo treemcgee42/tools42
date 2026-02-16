@@ -31,6 +31,31 @@ impl Display for MigrationParseError {
 
 impl std::error::Error for MigrationParseError {}
 
+#[derive(Debug)]
+pub enum MigrationRunnerError {
+    Sql(rusqlite::Error),
+}
+
+impl Display for MigrationRunnerError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(err) => write!(f, "sqlite error while running migrations: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for MigrationRunnerError {}
+
+impl From<rusqlite::Error> for MigrationRunnerError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Sql(value)
+    }
+}
+
+pub struct MigrationRunner<'conn> {
+    conn: &'conn rusqlite::Connection,
+}
+
 impl Migration {
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, MigrationParseError> {
         let path = path.as_ref();
@@ -68,9 +93,33 @@ impl Migration {
     }
 }
 
+impl<'conn> MigrationRunner<'conn> {
+    pub fn new(conn: &'conn rusqlite::Connection) -> Self {
+        Self { conn }
+    }
+
+    pub fn run<'m>(
+        &self,
+        _migrations: impl IntoIterator<Item = &'m Migration>,
+    ) -> Result<(), MigrationRunnerError> {
+        self.conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            ",
+        )?;
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     #[test]
@@ -97,5 +146,28 @@ mod tests {
             Migration::from_file(&path).expect_err("non-sql migration extension should fail");
 
         assert!(matches!(err, MigrationParseError::InvalidExtension));
+    }
+
+    #[test]
+    fn run_creates_schema_migrations_table_and_is_idempotent() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+
+        runner
+            .run(std::iter::empty())
+            .expect("first run should succeed");
+        runner
+            .run(std::iter::empty())
+            .expect("second run should also succeed");
+
+        let table_name: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema_migrations table should exist");
+
+        assert_eq!(table_name, "schema_migrations");
     }
 }
