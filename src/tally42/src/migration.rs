@@ -33,12 +33,14 @@ impl std::error::Error for MigrationParseError {}
 
 #[derive(Debug)]
 pub enum MigrationRunnerError {
+    Parse(MigrationParseError),
     Sql(rusqlite::Error),
 }
 
 impl Display for MigrationRunnerError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Parse(err) => write!(f, "failed to parse migration file: {err}"),
             Self::Sql(err) => write!(f, "sqlite error while running migrations: {err}"),
         }
     }
@@ -49,6 +51,12 @@ impl std::error::Error for MigrationRunnerError {}
 impl From<rusqlite::Error> for MigrationRunnerError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)
+    }
+}
+
+impl From<MigrationParseError> for MigrationRunnerError {
+    fn from(value: MigrationParseError) -> Self {
+        Self::Parse(value)
     }
 }
 
@@ -91,6 +99,15 @@ impl Migration {
             sql,
         })
     }
+
+    pub fn from_files<P>(
+        paths: impl IntoIterator<Item = P>,
+    ) -> impl Iterator<Item = Result<Self, MigrationParseError>>
+    where
+        P: AsRef<Path>,
+    {
+        paths.into_iter().map(Self::from_file)
+    }
 }
 
 impl<'conn> MigrationRunner<'conn> {
@@ -98,9 +115,9 @@ impl<'conn> MigrationRunner<'conn> {
         Self { conn }
     }
 
-    pub fn run<'m>(
+    pub fn run(
         &self,
-        _migrations: impl IntoIterator<Item = &'m Migration>,
+        migrations: impl IntoIterator<Item = Result<Migration, MigrationParseError>>,
     ) -> Result<(), MigrationRunnerError> {
         self.conn.execute_batch(
             "
@@ -112,7 +129,22 @@ impl<'conn> MigrationRunner<'conn> {
             ",
         )?;
 
+        for migration in migrations {
+            let _migration = migration.map_err(MigrationRunnerError::from)?;
+            // Migration application is not implemented yet.
+        }
+
         Ok(())
+    }
+
+    pub fn run_from_files<P>(
+        &self,
+        paths: impl IntoIterator<Item = P>,
+    ) -> Result<(), MigrationRunnerError>
+    where
+        P: AsRef<Path>,
+    {
+        self.run(Migration::from_files(paths))
     }
 }
 
@@ -154,10 +186,10 @@ mod tests {
         let runner = MigrationRunner::new(&conn);
 
         runner
-            .run(std::iter::empty())
+            .run(std::iter::empty::<Result<Migration, MigrationParseError>>())
             .expect("first run should succeed");
         runner
-            .run(std::iter::empty())
+            .run(std::iter::empty::<Result<Migration, MigrationParseError>>())
             .expect("second run should also succeed");
 
         let table_name: String = conn
@@ -169,5 +201,47 @@ mod tests {
             .expect("schema_migrations table should exist");
 
         assert_eq!(table_name, "schema_migrations");
+    }
+
+    #[test]
+    fn run_from_files_parses_and_runs() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+        let temp_dir = tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("0001_create_accounts.sql");
+        std::fs::write(&path, "CREATE TABLE accounts(id INTEGER PRIMARY KEY);")
+            .expect("write migration");
+
+        runner
+            .run_from_files([path.as_path()])
+            .expect("run_from_files should succeed");
+
+        let table_name: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='schema_migrations'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema_migrations table should exist");
+
+        assert_eq!(table_name, "schema_migrations");
+    }
+
+    #[test]
+    fn run_from_files_returns_parse_error() {
+        let conn = Connection::open_in_memory().expect("open in-memory sqlite database");
+        let runner = MigrationRunner::new(&conn);
+        let temp_dir = tempdir().expect("create temp dir");
+        let path = temp_dir.path().join("0001_create_accounts.txt");
+        std::fs::write(&path, "SELECT 1;").expect("write migration");
+
+        let err = runner
+            .run_from_files([path.as_path()])
+            .expect_err("non-sql file should fail parsing");
+
+        assert!(matches!(
+            err,
+            MigrationRunnerError::Parse(MigrationParseError::InvalidExtension)
+        ));
     }
 }
