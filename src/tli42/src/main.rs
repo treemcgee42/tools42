@@ -1,3 +1,5 @@
+mod trie;
+
 use std::io::{self, Write};
 
 struct Repl;
