@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map};
 
 type InternedStringType = u32;
 
@@ -51,6 +51,39 @@ struct Trie {
     string_interner: StringInterner,
     nodes: Vec<TrieNode>,
     root: TrieNode,
+}
+
+struct Completions<'a> {
+    partial: &'a str,
+    iter: Option<hash_map::Iter<'a, TrieNodeEdge, TrieNodeIdx>>,
+    nodes: &'a [TrieNode],
+    interner: &'a StringInterner,
+}
+
+impl<'a> Completions<'a> {
+    fn empty(partial: &'a str, nodes: &'a [TrieNode], interner: &'a StringInterner) -> Self {
+        Self {
+            partial,
+            iter: None,
+            nodes,
+            interner,
+        }
+    }
+}
+
+impl<'a> Iterator for Completions<'a> {
+    type Item = (&'a str, Option<TrieNodeValue>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let iter = self.iter.as_mut()?;
+        while let Some((edge, child_idx)) = iter.next() {
+            let token = self.interner.resolve(*edge)?;
+            if token.starts_with(self.partial) {
+                return Some((token, self.nodes[*child_idx].value));
+            }
+        }
+        None
+    }
 }
 
 impl Trie {
@@ -123,6 +156,47 @@ impl Trie {
         match current_idx {
             None => self.root.value,
             Some(node_idx) => self.nodes[node_idx].value,
+        }
+    }
+
+    pub fn get_completions<'a>(&'a self, s: &'a str) -> Completions<'a> {
+        let ends_with_whitespace = s.chars().last().is_some_and(char::is_whitespace);
+        let mut tokens = s.split_whitespace().collect::<Vec<_>>();
+
+        let partial = if ends_with_whitespace {
+            ""
+        } else {
+            tokens.pop().unwrap_or("")
+        };
+        let exact_tokens = tokens;
+
+        let mut current_idx: Option<TrieNodeIdx> = None;
+        for token in exact_tokens {
+            let edge = match self.string_interner.get_interned(token) {
+                Some(edge) => edge,
+                None => return Completions::empty(partial, &self.nodes, &self.string_interner),
+            };
+
+            current_idx = match current_idx {
+                None => self.root.children.get(&edge).copied(),
+                Some(node_idx) => self.nodes[node_idx].children.get(&edge).copied(),
+            };
+
+            if current_idx.is_none() {
+                return Completions::empty(partial, &self.nodes, &self.string_interner);
+            }
+        }
+
+        let children = match current_idx {
+            None => &self.root.children,
+            Some(node_idx) => &self.nodes[node_idx].children,
+        };
+
+        Completions {
+            partial,
+            iter: Some(children.iter()),
+            nodes: &self.nodes,
+            interner: &self.string_interner,
         }
     }
 }
@@ -229,6 +303,15 @@ mod string_interner_tests {
 mod trie_tests {
     use super::*;
 
+    fn sorted_completions(trie: &Trie, input: &str) -> Vec<(String, Option<TrieNodeValue>)> {
+        let mut results = trie
+            .get_completions(input)
+            .map(|(token, value)| (token.to_string(), value))
+            .collect::<Vec<_>>();
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        results
+    }
+
     #[test]
     fn get_returns_inserted_single_token_value() {
         let mut trie = Trie::new();
@@ -284,5 +367,63 @@ mod trie_tests {
 
         trie.add_string(" ", 99);
         assert_eq!(trie.get(""), Some(99));
+    }
+
+    #[test]
+    fn get_completions_matches_partial_last_token() {
+        let mut trie = Trie::new();
+        trie.add_string("foo bar", 1);
+        trie.add_string("foo baz", 2);
+        trie.add_string("foo qux", 3);
+
+        let got = sorted_completions(&trie, "foo ba");
+        assert_eq!(
+            got,
+            vec![("bar".to_string(), Some(1)), ("baz".to_string(), Some(2))]
+        );
+    }
+
+    #[test]
+    fn get_completions_with_trailing_whitespace_returns_all_next_tokens() {
+        let mut trie = Trie::new();
+        trie.add_string("foo bar", 1);
+        trie.add_string("foo baz", 2);
+        trie.add_string("foo qux", 3);
+
+        let got = sorted_completions(&trie, "foo ");
+        assert_eq!(
+            got,
+            vec![
+                ("bar".to_string(), Some(1)),
+                ("baz".to_string(), Some(2)),
+                ("qux".to_string(), Some(3))
+            ]
+        );
+    }
+
+    #[test]
+    fn get_completions_returns_empty_when_exact_prefix_path_missing() {
+        let mut trie = Trie::new();
+        trie.add_string("foo bar", 1);
+
+        let got = sorted_completions(&trie, "unknown ba");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn get_completions_from_root_for_single_partial_token() {
+        let mut trie = Trie::new();
+        trie.add_string("alpha one", 1);
+        trie.add_string("beta two", 2);
+        trie.add_string("alphabet three", 3);
+
+        let got = sorted_completions(&trie, "alp");
+        assert_eq!(
+            got,
+            vec![
+                ("alpha".to_string(), None),
+                ("alphabet".to_string(), None)
+            ]
+        );
     }
 }
