@@ -1,3 +1,4 @@
+mod account;
 mod manager;
 mod migration;
 mod model;
