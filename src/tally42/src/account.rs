@@ -1,4 +1,3 @@
-use rusqlite::Connection;
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
@@ -57,7 +56,7 @@ impl From<rusqlite::Error> for AccountListError {
 }
 
 impl Account {
-    pub fn list_accounts(conn: &Connection) -> Result<Vec<Account>, AccountListError> {
+    pub(crate) fn list_accounts(conn: &rusqlite::Connection) -> Result<Vec<Account>, AccountListError> {
         let mut stmt = conn.prepare(LIST_ACCOUNTS_SQL)?;
         let mut rows = stmt.query([])?;
         let mut accounts = Vec::new();
@@ -102,28 +101,11 @@ fn account_from_row(row: &rusqlite::Row<'_>) -> Result<Account, AccountListError
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use rusqlite::params;
 
-    fn create_accounts_table(conn: &Connection) {
-        conn.execute_batch(
-            "
-            CREATE TABLE accounts (
-              id           TEXT PRIMARY KEY,
-              parent_id    TEXT REFERENCES accounts(id),
-              name         TEXT NOT NULL,
-              currency     TEXT NOT NULL,
-              is_closed    INTEGER NOT NULL DEFAULT 0,
-              created_at   TEXT NOT NULL DEFAULT (datetime('now')),
-              note         TEXT,
-              UNIQUE(parent_id, name)
-            );
-            ",
-        )
-        .expect("create accounts table");
-    }
-
     fn insert_account(
-        conn: &Connection,
+        conn: &rusqlite::Connection,
         id: &str,
         parent_id: Option<&str>,
         name: &str,
@@ -144,8 +126,8 @@ mod tests {
 
     #[test]
     fn list_accounts_returns_all_fields() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
 
         let id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         insert_account(
@@ -159,7 +141,7 @@ mod tests {
             Some("household spending"),
         );
 
-        let accounts = Account::list_accounts(&conn).expect("list accounts");
+        let accounts = db.list_accounts().expect("list accounts");
         assert_eq!(accounts.len(), 1);
         assert_eq!(
             accounts[0],
@@ -177,8 +159,8 @@ mod tests {
 
     #[test]
     fn list_accounts_maps_null_parent_and_note() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
 
         let id = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
         insert_account(
@@ -192,15 +174,15 @@ mod tests {
             None,
         );
 
-        let accounts = Account::list_accounts(&conn).expect("list accounts");
+        let accounts = db.list_accounts().expect("list accounts");
         assert_eq!(accounts[0].parent_id, None);
         assert_eq!(accounts[0].note, None);
     }
 
     #[test]
     fn list_accounts_orders_by_parent_then_name() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
 
         let root_a = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaa1").unwrap();
         let root_b = Uuid::parse_str("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbb1").unwrap();
@@ -248,15 +230,15 @@ mod tests {
             None,
         );
 
-        let accounts = Account::list_accounts(&conn).expect("list accounts");
+        let accounts = db.list_accounts().expect("list accounts");
         let names: Vec<_> = accounts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["a-root", "b-root", "a-child", "z-child"]);
     }
 
     #[test]
     fn list_accounts_maps_is_closed_to_bool() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
 
         let open_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
         let closed_id = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
@@ -281,7 +263,7 @@ mod tests {
             None,
         );
 
-        let accounts = Account::list_accounts(&conn).expect("list accounts");
+        let accounts = db.list_accounts().expect("list accounts");
         let open = accounts.iter().find(|a| a.id == open_id).unwrap();
         let closed = accounts.iter().find(|a| a.id == closed_id).unwrap();
         assert!(!open.is_closed);
@@ -290,8 +272,8 @@ mod tests {
 
     #[test]
     fn list_accounts_errors_on_invalid_id_uuid() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
 
         insert_account(
             &conn,
@@ -304,14 +286,14 @@ mod tests {
             None,
         );
 
-        let err = Account::list_accounts(&conn).expect_err("expected invalid id error");
+        let err = db.list_accounts().expect_err("expected invalid id error");
         assert!(matches!(err, AccountListError::InvalidId { .. }));
     }
 
     #[test]
     fn list_accounts_errors_on_invalid_parent_id_uuid() {
-        let conn = Connection::open_in_memory().expect("open in-memory db");
-        create_accounts_table(&conn);
+        let db = Db::open_for_tests().expect("open in-memory db");
+        let conn = db.conn();
         conn.execute_batch("PRAGMA foreign_keys=OFF;")
             .expect("disable foreign keys for malformed parent_id fixture");
 
@@ -326,7 +308,7 @@ mod tests {
             None,
         );
 
-        let err = Account::list_accounts(&conn).expect_err("expected invalid parent id error");
+        let err = db.list_accounts().expect_err("expected invalid parent id error");
         assert!(matches!(err, AccountListError::InvalidParentId { .. }));
     }
 }

@@ -1,3 +1,4 @@
+use crate::db::{Db, DbError};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,7 @@ pub enum UserDataError {
     CreateDataDir(std::io::Error),
     DeleteDatabase(std::io::Error),
     OpenDatabase(rusqlite::Error),
+    OpenDb(DbError),
 }
 
 impl Display for UserDataError {
@@ -28,6 +30,7 @@ impl Display for UserDataError {
             Self::CreateDataDir(err) => write!(f, "failed to create data directory: {err}"),
             Self::DeleteDatabase(err) => write!(f, "failed to delete sqlite database: {err}"),
             Self::OpenDatabase(err) => write!(f, "failed to open sqlite database: {err}"),
+            Self::OpenDb(err) => write!(f, "failed to initialize sqlite database: {err}"),
         }
     }
 }
@@ -53,6 +56,11 @@ impl UserDataManager {
         // at the end of this function scope.
         rusqlite::Connection::open(&self.db_path).map_err(UserDataError::OpenDatabase)?;
         Ok(())
+    }
+
+    pub fn open_db(&self) -> Result<Db, UserDataError> {
+        std::fs::create_dir_all(&self.data_dir).map_err(UserDataError::CreateDataDir)?;
+        Db::open(&self.db_path).map_err(UserDataError::OpenDb)
     }
 
     pub fn delete_db(&self) -> Result<bool, UserDataError> {
@@ -138,5 +146,21 @@ mod tests {
         let deleted = manager.delete_db().expect("delete missing db");
 
         assert!(!deleted);
+    }
+
+    #[test]
+    fn open_db_returns_migrated_database() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let manager = UserDataManager::from_data_dir(&data_dir);
+
+        let db = manager.open_db().expect("open db");
+
+        let applied_count: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
+            .expect("count applied migrations");
+        assert_eq!(applied_count, 2);
+        assert!(manager.db_path().is_file());
     }
 }

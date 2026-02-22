@@ -1,4 +1,5 @@
 mod account;
+mod db;
 mod manager;
 mod migration;
 mod model;
@@ -6,7 +7,6 @@ mod user_data;
 
 use clap::{Parser, Subcommand};
 use manager::StatementManager;
-use migration::{Migration, MigrationRunner, MigrationsDir};
 use model::Statement;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
@@ -68,29 +68,11 @@ fn init_user_data_or_exit(manager: &UserDataManager) {
 }
 
 fn init_command_or_exit(manager: &UserDataManager) {
-    init_user_data_or_exit(manager);
-    run_embedded_migrations_or_exit(manager);
+    manager.open_db().unwrap_or_else(|err| {
+        eprintln!("error: failed to initialize database: {err}");
+        std::process::exit(1);
+    });
     println!("initialized database at {}", manager.db_path().display());
-}
-
-fn run_embedded_migrations_or_exit(manager: &UserDataManager) {
-    let conn = rusqlite::Connection::open(manager.db_path()).unwrap_or_else(|err| {
-        eprintln!(
-            "error: failed to open database for migrations ({}): {err}",
-            manager.db_path().display()
-        );
-        std::process::exit(1);
-    });
-    let source = MigrationsDir::embedded();
-    let migrations = Migration::from_source(&source).unwrap_or_else(|err| {
-        eprintln!("error: failed to discover embedded migrations: {err}");
-        std::process::exit(1);
-    });
-    let runner = MigrationRunner::new(&conn);
-    runner.run(&source, &migrations).unwrap_or_else(|err| {
-        eprintln!("error: failed to run embedded migrations: {err}");
-        std::process::exit(1);
-    });
 }
 
 fn delete_db_or_exit(manager: &UserDataManager) {
