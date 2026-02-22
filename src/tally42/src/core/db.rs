@@ -1,8 +1,8 @@
-use crate::account::{Account, AccountListError, AccountWriteError};
-use crate::migration::{
+use super::account::{Account, AccountListError, AccountWriteError};
+use super::migration::{
     Migration, MigrationDiscoveryError, MigrationRunner, MigrationRunnerError, MigrationsDir,
 };
-use crate::statement::{Statement, StatementListError, StatementWriteError};
+use super::statement::{Statement, StatementListError, StatementWriteError};
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use uuid::Uuid;

@@ -1,4 +1,4 @@
-use crate::db::{Db, DbError};
+use super::db::{Db, DbError};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
 

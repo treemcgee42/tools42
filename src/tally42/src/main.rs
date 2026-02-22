@@ -1,11 +1,7 @@
-mod account;
-mod db;
-mod migration;
-mod statement;
-mod user_data;
+mod core;
 
 use clap::{Parser, Subcommand};
-use user_data::UserDataManager;
+use core::UserDataManager;
 
 #[derive(Parser, Debug)]
 #[command(name = "tally42")]

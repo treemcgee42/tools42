@@ -85,7 +85,7 @@ impl From<rusqlite::Error> for AccountWriteError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::Db;
+    use crate::core::Db;
     use rusqlite::params;
 
     fn insert_account(
