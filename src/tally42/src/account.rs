@@ -49,6 +49,39 @@ impl From<rusqlite::Error> for AccountListError {
     }
 }
 
+#[derive(Debug)]
+pub enum AccountWriteError {
+    Sql(rusqlite::Error),
+    ReadBack(AccountListError),
+    NotFound(Uuid),
+}
+
+impl Display for AccountWriteError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(err) => write!(f, "sqlite error while writing account: {err}"),
+            Self::ReadBack(err) => write!(f, "failed to read back account after write: {err}"),
+            Self::NotFound(id) => write!(f, "account not found: {id}"),
+        }
+    }
+}
+
+impl std::error::Error for AccountWriteError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sql(err) => Some(err),
+            Self::ReadBack(err) => Some(err),
+            Self::NotFound(_) => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for AccountWriteError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Sql(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
