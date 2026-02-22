@@ -16,7 +16,6 @@ pub enum UserDataError {
     MissingHomeDir,
     CreateDataDir(std::io::Error),
     DeleteDatabase(std::io::Error),
-    OpenDatabase(rusqlite::Error),
     OpenDb(DbError),
 }
 
@@ -29,7 +28,6 @@ impl Display for UserDataError {
             ),
             Self::CreateDataDir(err) => write!(f, "failed to create data directory: {err}"),
             Self::DeleteDatabase(err) => write!(f, "failed to delete sqlite database: {err}"),
-            Self::OpenDatabase(err) => write!(f, "failed to open sqlite database: {err}"),
             Self::OpenDb(err) => write!(f, "failed to initialize sqlite database: {err}"),
         }
     }
@@ -50,11 +48,7 @@ impl UserDataManager {
     }
 
     pub fn init(&self) -> Result<(), UserDataError> {
-        std::fs::create_dir_all(&self.data_dir).map_err(UserDataError::CreateDataDir)?;
-        // `Connection::open` creates the sqlite file if it does not exist yet.
-        // The temporary connection is closed automatically when it is dropped
-        // at the end of this function scope.
-        rusqlite::Connection::open(&self.db_path).map_err(UserDataError::OpenDatabase)?;
+        let _db = self.open_db()?;
         Ok(())
     }
 
