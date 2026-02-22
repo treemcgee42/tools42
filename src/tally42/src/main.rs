@@ -1,6 +1,7 @@
 mod account;
 mod db;
 mod migration;
+mod statement;
 mod user_data;
 
 use clap::{Parser, Subcommand};
