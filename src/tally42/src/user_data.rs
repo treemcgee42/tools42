@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 const APP_DIR_NAME: &str = "tally42";
 const DB_FILE_NAME: &str = "tally42.db";
+const STATEMENTS_DIR_NAME: &str = "statements";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserDataManager {
@@ -54,6 +55,7 @@ impl UserDataManager {
 
     pub fn open_db(&self) -> Result<Db, UserDataError> {
         std::fs::create_dir_all(&self.data_dir).map_err(UserDataError::CreateDataDir)?;
+        std::fs::create_dir_all(self.statements_dir()).map_err(UserDataError::CreateDataDir)?;
         Db::open(&self.db_path).map_err(UserDataError::OpenDb)
     }
 
@@ -71,6 +73,10 @@ impl UserDataManager {
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    pub fn statements_dir(&self) -> PathBuf {
+        self.data_dir.join(STATEMENTS_DIR_NAME)
     }
 }
 
@@ -100,6 +106,7 @@ mod tests {
         manager.init().expect("initialize user data");
 
         assert!(manager.data_dir().is_dir());
+        assert!(manager.statements_dir().is_dir());
         assert!(manager.db_path().is_file());
         assert_eq!(manager.db_path(), data_dir.join(DB_FILE_NAME));
     }
@@ -114,6 +121,7 @@ mod tests {
         manager.init().expect("second init");
 
         assert!(manager.data_dir().is_dir());
+        assert!(manager.statements_dir().is_dir());
         assert!(manager.db_path().is_file());
     }
 
@@ -156,5 +164,6 @@ mod tests {
             .expect("count applied migrations");
         assert_eq!(applied_count, 3);
         assert!(manager.db_path().is_file());
+        assert!(manager.statements_dir().is_dir());
     }
 }
