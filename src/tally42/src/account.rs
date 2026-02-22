@@ -1,12 +1,6 @@
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
-const LIST_ACCOUNTS_SQL: &str = "
-SELECT id, parent_id, name, currency, is_closed, created_at, note
-FROM accounts
-ORDER BY parent_id, name, id
-";
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {
     pub id: Uuid,               // UUID-based ID
@@ -53,49 +47,6 @@ impl From<rusqlite::Error> for AccountListError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)
     }
-}
-
-impl Account {
-    pub(crate) fn list_accounts(conn: &rusqlite::Connection) -> Result<Vec<Account>, AccountListError> {
-        let mut stmt = conn.prepare(LIST_ACCOUNTS_SQL)?;
-        let mut rows = stmt.query([])?;
-        let mut accounts = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            accounts.push(account_from_row(row)?);
-        }
-
-        Ok(accounts)
-    }
-}
-
-fn account_from_row(row: &rusqlite::Row<'_>) -> Result<Account, AccountListError> {
-    let id_str: String = row.get("id")?;
-    let parent_id_str: Option<String> = row.get("parent_id")?;
-    let is_closed: i64 = row.get("is_closed")?;
-
-    let id = Uuid::parse_str(&id_str).map_err(|source| AccountListError::InvalidId {
-        value: id_str.clone(),
-        source,
-    })?;
-    let parent_id = parent_id_str
-        .as_deref()
-        .map(Uuid::parse_str)
-        .transpose()
-        .map_err(|source| AccountListError::InvalidParentId {
-            value: parent_id_str.clone().unwrap_or_default(),
-            source,
-        })?;
-
-    Ok(Account {
-        id,
-        parent_id,
-        name: row.get("name")?,
-        currency: row.get("currency")?,
-        is_closed: is_closed != 0,
-        created_at: row.get("created_at")?,
-        note: row.get("note")?,
-    })
 }
 
 #[cfg(test)]
