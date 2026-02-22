@@ -497,7 +497,7 @@ mod tests {
         let applied_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count applied migrations");
-        assert_eq!(applied_count, 2);
+        assert_eq!(applied_count, 3);
 
         let accounts_exists: i64 = conn
             .query_row(

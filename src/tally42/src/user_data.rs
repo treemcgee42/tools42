@@ -154,7 +154,7 @@ mod tests {
             .conn()
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count applied migrations");
-        assert_eq!(applied_count, 2);
+        assert_eq!(applied_count, 3);
         assert!(manager.db_path().is_file());
     }
 }
