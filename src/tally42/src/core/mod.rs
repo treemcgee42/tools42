@@ -11,7 +11,7 @@ pub use statement::{
     AddStatementError, AddStatementInput, Statement, StatementListError, StatementWriteError,
 };
 pub use transaction::{
-    CreateTransactionWithPostingsError, NewPostingInput, Posting, PostingDirection, PostingListError,
-    PostingWriteError, Transaction, TransactionListError, TransactionWriteError,
+    AddPostingInput, AddTransactionError, AddTransactionInput, Posting, PostingDirection,
+    Transaction,
 };
 pub use user_data::{UserDataError, UserDataManager};

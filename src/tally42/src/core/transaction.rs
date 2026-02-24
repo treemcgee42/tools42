@@ -1,4 +1,5 @@
 use super::db::Db;
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 use uuid::Uuid;
 
@@ -116,6 +117,22 @@ pub struct NewPostingInput {
     pub amount: i64,
     pub currency: String,
     pub direction: PostingDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddPostingInput {
+    pub account_id: Uuid,
+    pub amount: i64,
+    pub currency: String,
+    pub direction: PostingDirection,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddTransactionInput {
+    pub statement_id: Option<Uuid>,
+    pub description: Option<String>,
+    pub posted_at: String,
+    pub postings: Vec<AddPostingInput>,
 }
 
 #[derive(Debug)]
@@ -334,7 +351,120 @@ impl CreateTransactionWithPostingsError {
     }
 }
 
+#[derive(Debug)]
+pub enum AddTransactionError {
+    NoPostings,
+    Unbalanced {
+        currency: String,
+        debit_total: i64,
+        credit_total: i64,
+    },
+    AmountOverflow { currency: String },
+    Write(CreateTransactionWithPostingsError),
+}
+
+impl Display for AddTransactionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoPostings => write!(f, "transaction must have at least one posting"),
+            Self::Unbalanced {
+                currency,
+                debit_total,
+                credit_total,
+            } => write!(
+                f,
+                "transaction is unbalanced for currency {currency}: debits={debit_total}, credits={credit_total}"
+            ),
+            Self::AmountOverflow { currency } => {
+                write!(f, "posting totals overflowed while validating currency {currency}")
+            }
+            Self::Write(err) => write!(f, "failed to create transaction: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for AddTransactionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NoPostings => None,
+            Self::Unbalanced { .. } => None,
+            Self::AmountOverflow { .. } => None,
+            Self::Write(err) => Some(err),
+        }
+    }
+}
+
+impl From<CreateTransactionWithPostingsError> for AddTransactionError {
+    fn from(value: CreateTransactionWithPostingsError) -> Self {
+        Self::Write(value)
+    }
+}
+
 impl Db {
+    pub fn add_transaction(
+        &mut self,
+        input: AddTransactionInput,
+    ) -> Result<(Transaction, Vec<Posting>), AddTransactionError> {
+        if input.postings.is_empty() {
+            return Err(AddTransactionError::NoPostings);
+        }
+
+        let mut totals: BTreeMap<&str, (i64, i64)> = BTreeMap::new();
+        for posting in &input.postings {
+            let entry = totals.entry(posting.currency.as_str()).or_insert((0, 0));
+            match posting.direction {
+                PostingDirection::Debit => {
+                    entry.0 = entry
+                        .0
+                        .checked_add(posting.amount)
+                        .ok_or_else(|| AddTransactionError::AmountOverflow {
+                            currency: posting.currency.clone(),
+                        })?;
+                }
+                PostingDirection::Credit => {
+                    entry.1 = entry
+                        .1
+                        .checked_add(posting.amount)
+                        .ok_or_else(|| AddTransactionError::AmountOverflow {
+                            currency: posting.currency.clone(),
+                        })?;
+                }
+            }
+        }
+
+        for (currency, (debit_total, credit_total)) in totals {
+            if debit_total != credit_total {
+                return Err(AddTransactionError::Unbalanced {
+                    currency: currency.to_string(),
+                    debit_total,
+                    credit_total,
+                });
+            }
+        }
+
+        let tx_id = Uuid::new_v4();
+        let postings: Vec<NewPostingInput> = input
+            .postings
+            .into_iter()
+            .map(|posting| NewPostingInput {
+                id: Uuid::new_v4(),
+                account_id: posting.account_id,
+                amount: posting.amount,
+                currency: posting.currency,
+                direction: posting.direction,
+            })
+            .collect();
+
+        self.create_transaction_with_postings(
+            tx_id,
+            input.statement_id,
+            input.description.as_deref(),
+            &input.posted_at,
+            &postings,
+        )
+        .map_err(AddTransactionError::Write)
+    }
+
     pub fn list_transactions(&self) -> Result<Vec<Transaction>, TransactionListError> {
         let mut stmt = self.conn().prepare(
             "
@@ -754,5 +884,106 @@ mod tests {
             .expect("list postings")
             .iter()
             .all(|p| p.transaction_id != tx_id));
+    }
+
+    #[test]
+    fn add_transaction_creates_balanced_transaction_and_postings() {
+        let mut db = Db::open_for_tests().expect("open in-memory db");
+        let cash_id = Uuid::parse_str("31313131-3131-3131-3131-313131313131").unwrap();
+        let expense_id = Uuid::parse_str("32323232-3232-3232-3232-323232323232").unwrap();
+        db.create_account(cash_id, None, "assets:cash", "USD", None)
+            .expect("create cash account");
+        db.create_account(expense_id, None, "expenses:food", "USD", None)
+            .expect("create expense account");
+
+        let (transaction, postings) = db
+            .add_transaction(AddTransactionInput {
+                statement_id: None,
+                description: Some("Lunch".to_string()),
+                posted_at: "2026-02-24".to_string(),
+                postings: vec![
+                    AddPostingInput {
+                        account_id: expense_id,
+                        amount: 1500,
+                        currency: "USD".to_string(),
+                        direction: PostingDirection::Debit,
+                    },
+                    AddPostingInput {
+                        account_id: cash_id,
+                        amount: 1500,
+                        currency: "USD".to_string(),
+                        direction: PostingDirection::Credit,
+                    },
+                ],
+            })
+            .expect("add transaction");
+
+        assert_eq!(transaction.description.as_deref(), Some("Lunch"));
+        assert_eq!(transaction.posted_at, "2026-02-24");
+        assert_eq!(postings.len(), 2);
+        assert!(postings.iter().all(|p| p.transaction_id == transaction.id));
+    }
+
+    #[test]
+    fn add_transaction_rejects_unbalanced_per_currency() {
+        let mut db = Db::open_for_tests().expect("open in-memory db");
+        let a_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
+        let b_id = Uuid::parse_str("34343434-3434-3434-3434-343434343434").unwrap();
+        let c_id = Uuid::parse_str("35353535-3535-3535-3535-353535353535").unwrap();
+        let d_id = Uuid::parse_str("36363636-3636-3636-3636-363636363636").unwrap();
+        for (id, name, cur) in [
+            (a_id, "a", "USD"),
+            (b_id, "b", "USD"),
+            (c_id, "c", "EUR"),
+            (d_id, "d", "EUR"),
+        ] {
+            db.create_account(id, None, name, cur, None)
+                .expect("create account");
+        }
+
+        let err = db
+            .add_transaction(AddTransactionInput {
+                statement_id: None,
+                description: None,
+                posted_at: "2026-02-24".to_string(),
+                postings: vec![
+                    AddPostingInput {
+                        account_id: a_id,
+                        amount: 100,
+                        currency: "USD".to_string(),
+                        direction: PostingDirection::Debit,
+                    },
+                    AddPostingInput {
+                        account_id: b_id,
+                        amount: 100,
+                        currency: "USD".to_string(),
+                        direction: PostingDirection::Credit,
+                    },
+                    AddPostingInput {
+                        account_id: c_id,
+                        amount: 200,
+                        currency: "EUR".to_string(),
+                        direction: PostingDirection::Debit,
+                    },
+                    AddPostingInput {
+                        account_id: d_id,
+                        amount: 150,
+                        currency: "EUR".to_string(),
+                        direction: PostingDirection::Credit,
+                    },
+                ],
+            })
+            .expect_err("should reject unbalanced transaction");
+
+        assert!(matches!(
+            err,
+            AddTransactionError::Unbalanced {
+                currency,
+                debit_total: 200,
+                credit_total: 150
+            } if currency == "EUR"
+        ));
+        assert!(db.list_transactions().expect("list tx").is_empty());
+        assert!(db.list_postings().expect("list postings").is_empty());
     }
 }
