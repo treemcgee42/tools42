@@ -1,3 +1,4 @@
+use super::core_api::Core;
 use super::db::Db;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
@@ -400,7 +401,7 @@ impl From<CreateTransactionWithPostingsError> for AddTransactionError {
     }
 }
 
-impl Db {
+impl Core {
     pub fn add_transaction(
         &mut self,
         input: AddTransactionInput,
@@ -455,7 +456,7 @@ impl Db {
             })
             .collect();
 
-        self.create_transaction_with_postings(
+        self.db_mut().create_transaction_with_postings(
             tx_id,
             input.statement_id,
             input.description.as_deref(),
@@ -464,7 +465,9 @@ impl Db {
         )
         .map_err(AddTransactionError::Write)
     }
+}
 
+impl Db {
     pub fn list_transactions(&self) -> Result<Vec<Transaction>, TransactionListError> {
         let mut stmt = self.conn().prepare(
             "
@@ -888,15 +891,17 @@ mod tests {
 
     #[test]
     fn add_transaction_creates_balanced_transaction_and_postings() {
-        let mut db = Db::open_for_tests().expect("open in-memory db");
+        let mut core = Core::open_for_tests().expect("open core");
         let cash_id = Uuid::parse_str("31313131-3131-3131-3131-313131313131").unwrap();
         let expense_id = Uuid::parse_str("32323232-3232-3232-3232-323232323232").unwrap();
-        db.create_account(cash_id, None, "assets:cash", "USD", None)
+        core.db_mut()
+            .create_account(cash_id, None, "assets:cash", "USD", None)
             .expect("create cash account");
-        db.create_account(expense_id, None, "expenses:food", "USD", None)
+        core.db_mut()
+            .create_account(expense_id, None, "expenses:food", "USD", None)
             .expect("create expense account");
 
-        let (transaction, postings) = db
+        let (transaction, postings) = core
             .add_transaction(AddTransactionInput {
                 statement_id: None,
                 description: Some("Lunch".to_string()),
@@ -926,7 +931,7 @@ mod tests {
 
     #[test]
     fn add_transaction_rejects_unbalanced_per_currency() {
-        let mut db = Db::open_for_tests().expect("open in-memory db");
+        let mut core = Core::open_for_tests().expect("open core");
         let a_id = Uuid::parse_str("33333333-3333-3333-3333-333333333333").unwrap();
         let b_id = Uuid::parse_str("34343434-3434-3434-3434-343434343434").unwrap();
         let c_id = Uuid::parse_str("35353535-3535-3535-3535-353535353535").unwrap();
@@ -937,11 +942,12 @@ mod tests {
             (c_id, "c", "EUR"),
             (d_id, "d", "EUR"),
         ] {
-            db.create_account(id, None, name, cur, None)
+            core.db_mut()
+                .create_account(id, None, name, cur, None)
                 .expect("create account");
         }
 
-        let err = db
+        let err = core
             .add_transaction(AddTransactionInput {
                 statement_id: None,
                 description: None,
@@ -983,7 +989,7 @@ mod tests {
                 credit_total: 150
             } if currency == "EUR"
         ));
-        assert!(db.list_transactions().expect("list tx").is_empty());
-        assert!(db.list_postings().expect("list postings").is_empty());
+        assert!(core.db_mut().list_transactions().expect("list tx").is_empty());
+        assert!(core.db_mut().list_postings().expect("list postings").is_empty());
     }
 }
