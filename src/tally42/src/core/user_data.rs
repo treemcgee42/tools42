@@ -281,7 +281,7 @@ mod tests {
             .conn()
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count applied migrations");
-        assert_eq!(applied_count, 3);
+        assert_eq!(applied_count, 4);
         assert!(manager.db_path().is_file());
         assert!(manager.statements_dir().is_dir());
     }
