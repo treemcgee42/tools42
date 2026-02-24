@@ -1,4 +1,3 @@
-use super::account::{Account, AccountListError, AccountWriteError};
 use super::migration::{
     Migration, MigrationDiscoveryError, MigrationRunner, MigrationRunnerError, MigrationsDir,
 };
@@ -10,18 +9,6 @@ use super::transaction::{
 use std::fmt::{Display, Formatter};
 use std::path::Path;
 use uuid::Uuid;
-
-const LIST_ACCOUNTS_SQL: &str = "
-SELECT id, parent_id, name, currency, is_closed, created_at, note
-FROM accounts
-ORDER BY parent_id, name, id
-";
-
-const GET_ACCOUNT_BY_ID_SQL: &str = "
-SELECT id, parent_id, name, currency, is_closed, created_at, note
-FROM accounts
-WHERE id = ?1
-";
 
 const LIST_STATEMENTS_SQL: &str = "
 SELECT
@@ -156,60 +143,6 @@ impl Db {
     pub fn open_for_tests() -> Result<Self, DbError> {
         let conn = rusqlite::Connection::open_in_memory().map_err(DbError::Open)?;
         Self::from_connection(conn)
-    }
-
-    pub fn list_accounts(&self) -> Result<Vec<Account>, AccountListError> {
-        let mut stmt = self.conn.prepare(LIST_ACCOUNTS_SQL)?;
-        let mut rows = stmt.query([])?;
-        let mut accounts = Vec::new();
-
-        while let Some(row) = rows.next()? {
-            accounts.push(account_from_row(row)?);
-        }
-
-        Ok(accounts)
-    }
-
-    pub fn create_account(
-        &self,
-        id: Uuid,
-        parent_id: Option<Uuid>,
-        name: &str,
-        currency: &str,
-        note: Option<&str>,
-    ) -> Result<Account, AccountWriteError> {
-        let id_str = id.to_string();
-        let parent_id_str = parent_id.map(|p| p.to_string());
-        self.conn.execute(
-            "
-            INSERT INTO accounts (id, parent_id, name, currency, is_closed, note)
-            VALUES (?1, ?2, ?3, ?4, 0, ?5)
-            ",
-            rusqlite::params![id_str, parent_id_str, name, currency, note],
-        )?;
-        self.get_account_by_id(id)?.ok_or(AccountWriteError::NotFound(id))
-    }
-
-    pub fn rename_account(&self, id: Uuid, new_name: &str) -> Result<Account, AccountWriteError> {
-        let updated = self.conn.execute(
-            "UPDATE accounts SET name = ?2 WHERE id = ?1",
-            rusqlite::params![id.to_string(), new_name],
-        )?;
-        if updated == 0 {
-            return Err(AccountWriteError::NotFound(id));
-        }
-        self.get_account_by_id(id)?.ok_or(AccountWriteError::NotFound(id))
-    }
-
-    pub fn close_account(&self, id: Uuid) -> Result<Account, AccountWriteError> {
-        let updated = self.conn.execute(
-            "UPDATE accounts SET is_closed = 1 WHERE id = ?1",
-            rusqlite::params![id.to_string()],
-        )?;
-        if updated == 0 {
-            return Err(AccountWriteError::NotFound(id));
-        }
-        self.get_account_by_id(id)?.ok_or(AccountWriteError::NotFound(id))
     }
 
     pub fn list_statements(&self) -> Result<Vec<Statement>, StatementListError> {
@@ -423,18 +356,8 @@ impl Db {
         Ok(Self { conn })
     }
 
-    #[cfg(test)]
     pub(crate) fn conn(&self) -> &rusqlite::Connection {
         &self.conn
-    }
-
-    fn get_account_by_id(&self, id: Uuid) -> Result<Option<Account>, AccountWriteError> {
-        let mut stmt = self.conn.prepare(GET_ACCOUNT_BY_ID_SQL)?;
-        let mut rows = stmt.query([id.to_string()])?;
-        match rows.next()? {
-            Some(row) => account_from_row(row).map(Some).map_err(AccountWriteError::ReadBack),
-            None => Ok(None),
-        }
     }
 
     fn get_statement_by_id(&self, id: Uuid) -> Result<Option<Statement>, StatementWriteError> {
@@ -467,35 +390,6 @@ impl Db {
             None => Ok(None),
         }
     }
-}
-
-fn account_from_row(row: &rusqlite::Row<'_>) -> Result<Account, AccountListError> {
-    let id_str: String = row.get("id")?;
-    let parent_id_str: Option<String> = row.get("parent_id")?;
-    let is_closed: i64 = row.get("is_closed")?;
-
-    let id = Uuid::parse_str(&id_str).map_err(|source| AccountListError::InvalidId {
-        value: id_str.clone(),
-        source,
-    })?;
-    let parent_id = parent_id_str
-        .as_deref()
-        .map(Uuid::parse_str)
-        .transpose()
-        .map_err(|source| AccountListError::InvalidParentId {
-            value: parent_id_str.clone().unwrap_or_default(),
-            source,
-        })?;
-
-    Ok(Account {
-        id,
-        parent_id,
-        name: row.get("name")?,
-        currency: row.get("currency")?,
-        is_closed: is_closed != 0,
-        created_at: row.get("created_at")?,
-        note: row.get("note")?,
-    })
 }
 
 fn statement_from_row(row: &rusqlite::Row<'_>) -> Result<Statement, StatementListError> {
@@ -656,72 +550,6 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| row.get(0))
             .expect("count applied migrations");
         assert_eq!(applied_count, 4);
-    }
-
-    #[test]
-    fn create_account_inserts_and_returns_account() {
-        let db = Db::open_for_tests().expect("open in-memory db");
-        let id = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
-
-        let account = db
-            .create_account(id, None, "cash", "USD", Some("wallet"))
-            .expect("create account");
-
-        assert_eq!(account.id, id);
-        assert_eq!(account.parent_id, None);
-        assert_eq!(account.name, "cash");
-        assert_eq!(account.currency, "USD");
-        assert!(!account.is_closed);
-        assert_eq!(account.note.as_deref(), Some("wallet"));
-        assert!(!account.created_at.is_empty());
-    }
-
-    #[test]
-    fn rename_account_updates_name() {
-        let db = Db::open_for_tests().expect("open in-memory db");
-        let id = Uuid::parse_str("77777777-7777-7777-7777-777777777777").unwrap();
-        db.create_account(id, None, "old-name", "USD", None)
-            .expect("create account");
-
-        let renamed = db.rename_account(id, "new-name").expect("rename account");
-
-        assert_eq!(renamed.name, "new-name");
-        assert_eq!(renamed.id, id);
-    }
-
-    #[test]
-    fn rename_account_returns_not_found_for_missing_id() {
-        let db = Db::open_for_tests().expect("open in-memory db");
-        let missing = Uuid::parse_str("88888888-8888-8888-8888-888888888888").unwrap();
-
-        let err = db
-            .rename_account(missing, "new-name")
-            .expect_err("rename should fail");
-
-        assert!(matches!(err, AccountWriteError::NotFound(id) if id == missing));
-    }
-
-    #[test]
-    fn close_account_sets_is_closed() {
-        let db = Db::open_for_tests().expect("open in-memory db");
-        let id = Uuid::parse_str("99999999-9999-9999-9999-999999999999").unwrap();
-        db.create_account(id, None, "card", "USD", None)
-            .expect("create account");
-
-        let closed = db.close_account(id).expect("close account");
-
-        assert!(closed.is_closed);
-        assert_eq!(closed.id, id);
-    }
-
-    #[test]
-    fn close_account_returns_not_found_for_missing_id() {
-        let db = Db::open_for_tests().expect("open in-memory db");
-        let missing = Uuid::parse_str("aaaaaaaa-0000-0000-0000-000000000000").unwrap();
-
-        let err = db.close_account(missing).expect_err("close should fail");
-
-        assert!(matches!(err, AccountWriteError::NotFound(id) if id == missing));
     }
 
     #[test]
