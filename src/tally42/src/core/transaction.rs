@@ -695,7 +695,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Db;
+    use crate::core::db::Db;
 
     #[test]
     fn create_transaction_inserts_and_returns_transaction() {

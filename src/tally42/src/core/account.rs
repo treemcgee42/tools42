@@ -194,7 +194,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Db;
+    use crate::core::db::Db;
     use rusqlite::params;
 
     fn insert_account(

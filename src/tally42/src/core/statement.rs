@@ -331,7 +331,7 @@ impl std::error::Error for AddStatementError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Db;
+    use crate::core::db::Db;
 
     #[test]
     fn create_statement_inserts_and_returns_statement() {

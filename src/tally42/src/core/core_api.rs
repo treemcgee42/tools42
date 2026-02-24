@@ -1,7 +1,7 @@
 use super::db::Db;
 use super::user_data::{UserDataError, UserDataManager};
 use std::fmt::{Display, Formatter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct Core {
     _user_data: UserDataManager,
@@ -48,6 +48,17 @@ impl Core {
 
     pub fn init(&self) -> Result<(), CoreError> {
         Ok(())
+    }
+
+    pub fn db_path(&self) -> &Path {
+        self._user_data.db_path()
+    }
+
+    pub fn delete_db_from_environment() -> Result<(PathBuf, bool), CoreError> {
+        let user_data = UserDataManager::from_environment()?;
+        let db_path = user_data.db_path().to_path_buf();
+        let deleted = user_data.delete_db()?;
+        Ok((db_path, deleted))
     }
 
     pub(super) fn db_mut(&mut self) -> &mut Db {

@@ -1,7 +1,7 @@
 mod core;
 
 use clap::{Parser, Subcommand};
-use core::UserDataManager;
+use core::Core;
 
 #[derive(Parser, Debug)]
 #[command(name = "tally42")]
@@ -19,33 +19,29 @@ enum Command {
 
 fn main() {
     let args = Args::parse();
-    let user_data_manager = user_data_manager_or_exit();
 
     match args.command {
-        Command::Init => init_command_or_exit(&user_data_manager),
-        Command::DeleteDb => delete_db_or_exit(&user_data_manager),
+        Command::Init => init_command_or_exit(),
+        Command::DeleteDb => delete_db_or_exit(),
     }
 }
 
-fn user_data_manager_or_exit() -> UserDataManager {
-    UserDataManager::from_environment().unwrap_or_else(|err| {
-        eprintln!("error: failed to resolve user data directory: {err}");
-        std::process::exit(1);
-    })
-}
-
-fn init_command_or_exit(manager: &UserDataManager) {
-    manager.open_db().unwrap_or_else(|err| {
-        eprintln!("error: failed to initialize database: {err}");
+fn init_command_or_exit() {
+    let core = Core::from_environment().unwrap_or_else(|err| {
+        eprintln!("error: failed to initialize core: {err}");
         std::process::exit(1);
     });
-    println!("initialized database at {}", manager.db_path().display());
+    core.init().unwrap_or_else(|err| {
+        eprintln!("error: failed to initialize core: {err}");
+        std::process::exit(1);
+    });
+    println!("initialized database at {}", core.db_path().display());
 }
 
-fn delete_db_or_exit(manager: &UserDataManager) {
-    match manager.delete_db() {
-        Ok(true) => println!("deleted database at {}", manager.db_path().display()),
-        Ok(false) => println!("database not found at {}", manager.db_path().display()),
+fn delete_db_or_exit() {
+    match Core::delete_db_from_environment() {
+        Ok((path, true)) => println!("deleted database at {}", path.display()),
+        Ok((path, false)) => println!("database not found at {}", path.display()),
         Err(err) => {
             eprintln!("error: failed to delete database: {err}");
             std::process::exit(1);
