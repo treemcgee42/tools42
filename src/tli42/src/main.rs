@@ -1,3 +1,4 @@
+mod sm;
 mod trie;
 
 use std::io::{self, Write};
