@@ -7,6 +7,18 @@ enum Edge {
     Var,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchedEdgeKind {
+    Literal,
+    Var,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StepResult {
+    pub(crate) next_state: StateId,
+    pub(crate) matched: MatchedEdgeKind,
+}
+
 #[derive(Debug, Default)]
 struct State {
     edges: Vec<(Edge, StateId)>,
@@ -104,29 +116,43 @@ impl Sm {
             .unwrap_or_default()
     }
 
-    /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
-    pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
+    /// Returns the chosen edge kind + next state under CLI abbreviation rules.
+    pub(crate) fn step(&self, current_state: StateId, input_token: &str) -> Option<StepResult> {
         let scan = self.scan_state(current_state, input_token, false)?;
 
         if scan.exact_literal_count == 1 {
-            return scan.exact_literal;
+            return scan.exact_literal.map(|next_state| StepResult {
+                next_state,
+                matched: MatchedEdgeKind::Literal,
+            });
         }
         if scan.exact_literal_count > 1 {
             return None;
         }
 
         if scan.prefix_literal_count == 1 {
-            return scan.prefix_literal;
+            return scan.prefix_literal.map(|next_state| StepResult {
+                next_state,
+                matched: MatchedEdgeKind::Literal,
+            });
         }
         if scan.prefix_literal_count > 1 {
             return None;
         }
 
         if scan.var_match_count == 1 {
-            return scan.var_match;
+            return scan.var_match.map(|next_state| StepResult {
+                next_state,
+                matched: MatchedEdgeKind::Var,
+            });
         }
 
         None
+    }
+
+    /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
+    pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
+        self.step(current_state, input_token).map(|step| step.next_state)
     }
 
     /// Starting at `current_state`, if there is a literal edge for `literal` already, return
@@ -316,6 +342,55 @@ mod tests {
         }]);
 
         assert_eq!(sm.next_state(0, "anything"), None);
+    }
+
+    #[test]
+    fn step_reports_literal_match_kind() {
+        let sm = sm_with_states(vec![State {
+            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            accept: None,
+        }]);
+
+        assert_eq!(
+            sm.step(0, "sh"),
+            Some(StepResult {
+                next_state: 1,
+                matched: MatchedEdgeKind::Literal
+            })
+        );
+    }
+
+    #[test]
+    fn step_reports_var_match_kind() {
+        let sm = sm_with_states(vec![State {
+            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            accept: None,
+        }]);
+
+        assert_eq!(
+            sm.step(0, "eth0"),
+            Some(StepResult {
+                next_state: 2,
+                matched: MatchedEdgeKind::Var
+            })
+        );
+    }
+
+    #[test]
+    fn step_reuses_next_state_precedence() {
+        let sm = sm_with_states(vec![State {
+            edges: vec![(lit("show"), 1), (lit("shell"), 2), (Edge::Var, 3)],
+            accept: None,
+        }]);
+
+        assert_eq!(
+            sm.step(0, "show"),
+            Some(StepResult {
+                next_state: 1,
+                matched: MatchedEdgeKind::Literal
+            })
+        );
+        assert_eq!(sm.step(0, "sh"), None);
     }
 
     #[test]

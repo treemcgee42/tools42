@@ -21,6 +21,7 @@ pub(crate) type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReplError {
     InvalidModeId(ModeId),
+    InvalidCommandId(CommandId),
     EmptyModeStack,
     CannotPopRootMode,
     CmdInsert(sm::CmdInsertError),
@@ -36,6 +37,15 @@ pub(crate) struct Repl {
     modes: Vec<mode::Mode>,
     stack: Vec<ModeId>,
     handlers: Vec<Handler>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RunOnceOutcome {
+    Noop,
+    UnknownCommand,
+    IncompleteCommand,
+    HandlerError(HandlerError),
+    ActionApplied(Action),
 }
 
 impl Repl {
@@ -126,6 +136,98 @@ impl Repl {
             return Err(err);
         }
         Ok(command_id)
+    }
+
+    fn tokenize(&self, line: &str) -> ParsedInputs {
+        line.split_whitespace().map(str::to_string).collect()
+    }
+
+    fn apply(&mut self, action: Action) -> Result<Action, ReplError> {
+        match action {
+            Action::None => Ok(Action::None),
+            Action::PushMode(mode_id) => {
+                self.push_mode(mode_id)?;
+                Ok(Action::PushMode(mode_id))
+            }
+            Action::PopMode => {
+                self.pop_mode()?;
+                Ok(Action::PopMode)
+            }
+            Action::Exit => Ok(Action::Exit),
+        }
+    }
+
+    fn invoke_handler(
+        &mut self,
+        command_id: CommandId,
+        inputs: &[String],
+    ) -> Result<Action, HandlerError> {
+        let idx = command_id as usize;
+        if idx >= self.handlers.len() {
+            return Err(HandlerError(format!("invalid command id {}", command_id)));
+        }
+
+        let mut handler = self.handlers.swap_remove(idx);
+        let result = handler(self, inputs);
+
+        if idx == self.handlers.len() {
+            self.handlers.push(handler);
+        } else {
+            self.handlers.push(handler);
+            let last = self.handlers.len() - 1;
+            self.handlers.swap(idx, last);
+        }
+
+        result
+    }
+
+    pub(crate) fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
+        let tokens = self.tokenize(line);
+        if tokens.is_empty() {
+            return Ok(RunOnceOutcome::Noop);
+        }
+
+        if tokens.first().map(String::as_str) == Some("exit") {
+            let action = if self.current_mode_id()? == 0 {
+                Action::Exit
+            } else {
+                Action::PopMode
+            };
+            let applied = self.apply(action)?;
+            return Ok(RunOnceOutcome::ActionApplied(applied));
+        }
+
+        let (command_id, captures) = {
+            let mode = self.current_mode()?;
+            let mut state = mode.root_state();
+            let mut captures: ParsedInputs = Vec::new();
+
+            for token in &tokens {
+                let step = match mode.step(state, token) {
+                    Some(step) => step,
+                    None => return Ok(RunOnceOutcome::UnknownCommand),
+                };
+                if step.matched == sm::MatchedEdgeKind::Var {
+                    captures.push(token.clone());
+                }
+                state = step.next_state;
+            }
+
+            let command_id = match mode.accept_at(state)? {
+                Some(command_id) => command_id,
+                None => return Ok(RunOnceOutcome::IncompleteCommand),
+            };
+
+            (command_id, captures)
+        };
+
+        let action = match self.invoke_handler(command_id, &captures) {
+            Ok(action) => action,
+            Err(err) => return Ok(RunOnceOutcome::HandlerError(err)),
+        };
+
+        let applied = self.apply(action)?;
+        Ok(RunOnceOutcome::ActionApplied(applied))
     }
 
     #[cfg(test)]
@@ -339,5 +441,159 @@ mod tests {
                 attempted: 1,
             })
         );
+    }
+
+    #[test]
+    fn run_once_returns_noop_for_empty_or_whitespace_input() {
+        let mut repl = Repl::new();
+
+        assert_eq!(repl.run_once("").unwrap(), RunOnceOutcome::Noop);
+        assert_eq!(repl.run_once("   ").unwrap(), RunOnceOutcome::Noop);
+    }
+
+    #[test]
+    fn run_once_exit_in_root_returns_exit_action() {
+        let mut repl = Repl::new();
+
+        assert_eq!(
+            repl.run_once("exit").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::Exit)
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn run_once_exit_in_submode_pops_mode() {
+        let mut repl = Repl::new();
+        let cfg = repl.add_mode("config");
+        repl.push_mode(cfg).unwrap();
+
+        assert_eq!(
+            repl.run_once("exit").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::PopMode)
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn run_once_returns_unknown_for_unmatched_command() {
+        let mut repl = Repl::new();
+
+        assert_eq!(repl.run_once("nope").unwrap(), RunOnceOutcome::UnknownCommand);
+    }
+
+    #[test]
+    fn run_once_returns_incomplete_for_non_terminal_match() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+        repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("show").unwrap(),
+            RunOnceOutcome::IncompleteCommand
+        );
+    }
+
+    #[test]
+    fn run_once_invokes_handler_with_captured_var_inputs() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_clone = Rc::clone(&seen);
+        let cmd = build_cmd(&["show"], 2);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = inputs.to_vec();
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("show a b").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::None)
+        );
+        assert_eq!(&*seen.borrow(), &vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn run_once_does_not_capture_literal_tokens() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_clone = Rc::clone(&seen);
+        let cmd = build_cmd(&["show", "ip"], 1);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = inputs.to_vec();
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        let _ = repl.run_once("show ip eth0").unwrap();
+        assert_eq!(&*seen.borrow(), &vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn run_once_applies_push_mode_action() {
+        let mut repl = Repl::new();
+        let cfg = repl.add_mode("config");
+        let cmd = build_cmd(&["configure"], 0);
+
+        repl.register_mode_command(0, &cmd, Box::new(move |_, _| Ok(Action::PushMode(cfg))))
+            .unwrap();
+
+        assert_eq!(
+            repl.run_once("configure").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::PushMode(cfg))
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), cfg);
+    }
+
+    #[test]
+    fn run_once_applies_pop_mode_action() {
+        let mut repl = Repl::new();
+        let cfg = repl.add_mode("config");
+        repl.push_mode(cfg).unwrap();
+        let cmd = build_cmd(&["end"], 0);
+
+        repl.register_mode_command(cfg, &cmd, Box::new(|_, _| Ok(Action::PopMode)))
+            .unwrap();
+
+        assert_eq!(
+            repl.run_once("end").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::PopMode)
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn run_once_returns_handler_error_outcome() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["boom"], 0);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(|_, _| Err(HandlerError("boom".to_string()))),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("boom").unwrap(),
+            RunOnceOutcome::HandlerError(HandlerError("boom".to_string()))
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), 0);
     }
 }

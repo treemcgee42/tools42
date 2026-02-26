@@ -46,12 +46,27 @@ impl Mode {
         self.sm.next_state(current_state, input_token)
     }
 
+    pub(crate) fn step(
+        &self,
+        current_state: sm::StateId,
+        input_token: &str,
+    ) -> Option<sm::StepResult> {
+        self.sm.step(current_state, input_token)
+    }
+
     pub(crate) fn get_completions<'a>(
         &'a self,
         current_state: sm::StateId,
         partial_token: &str,
     ) -> Vec<&'a str> {
         self.sm.get_completions(current_state, partial_token)
+    }
+
+    pub(crate) fn accept_at(
+        &self,
+        state_id: sm::StateId,
+    ) -> Result<Option<sm::CommandId>, sm::CmdInsertError> {
+        self.sm.accept_at(state_id)
     }
 }
 
@@ -88,6 +103,19 @@ mod tests {
 
         let completions = mode.get_completions(mode.root_state(), "sh");
         assert_eq!(completions, vec!["show"]);
+    }
+
+    #[test]
+    fn mode_step_delegates_to_sm() {
+        let mut mode = Mode::new(1, "exec");
+        let cmd = build_cmd(&["show"], 1);
+        mode.insert_cmd(&cmd, 10).unwrap();
+
+        let show = mode.step(mode.root_state(), "sh").unwrap();
+        assert_eq!(show.matched, sm::MatchedEdgeKind::Literal);
+        let var = mode.step(show.next_state, "eth0").unwrap();
+        assert_eq!(var.matched, sm::MatchedEdgeKind::Var);
+        assert_eq!(mode.accept_at(var.next_state).unwrap(), Some(10));
     }
 
     #[test]
