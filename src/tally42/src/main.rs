@@ -24,6 +24,7 @@ fn build_repl() -> Result<Repl, ReplError> {
     let write_mode_id = register_write_mode(&mut repl)?;
     register_root_commands(&mut repl, write_mode_id)?;
     register_write_mode_commands(&mut repl, write_mode_id)?;
+    register_docs(&mut repl, write_mode_id)?;
     Ok(repl)
 }
 
@@ -74,6 +75,19 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
     Ok(())
 }
 
+fn register_docs(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
+    repl.set_edge_doc(0, "write", "enter write mode")?;
+    repl.set_command_doc(0, "write", "enter write mode commands")?;
+
+    repl.set_edge_doc(write_mode_id, "init", "initialize the tally database")?;
+    repl.set_command_doc(write_mode_id, "init", "create the tally database and schema")?;
+
+    repl.set_edge_doc(write_mode_id, "delete-db", "delete the tally database file")?;
+    repl.set_command_doc(write_mode_id, "delete-db", "remove the tally database from disk")?;
+
+    Ok(())
+}
+
 fn init_command_or_exit() {
     let core = Core::from_environment().unwrap_or_else(|err| {
         eprintln!("error: failed to initialize core: {err}");
@@ -100,7 +114,7 @@ fn delete_db_or_exit() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tli42::repl::RunOnceOutcome;
+    use tli42::repl::{CompletionItem, RunOnceOutcome};
 
     #[test]
     fn write_command_pushes_write_mode() {
@@ -109,5 +123,26 @@ mod tests {
         let outcome = repl.run_once("write").expect("run_once should succeed");
         assert_eq!(outcome, RunOnceOutcome::ActionApplied(Action::PushMode(1)));
         assert_eq!(repl.current_mode_id().expect("current mode id"), 1);
+    }
+
+    #[test]
+    fn question_shows_annotated_write_mode_completions() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl.run_once("?").expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: "delete-db".to_string(),
+                    doc: Some("delete the tally database file".to_string()),
+                },
+                CompletionItem {
+                    token: "init".to_string(),
+                    doc: Some("initialize the tally database".to_string()),
+                },
+            ])
+        );
     }
 }
