@@ -68,10 +68,17 @@ pub struct Repl {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOnceOutcome {
     Noop,
+    Completions(Vec<String>),
     UnknownCommand,
     IncompleteCommand,
     HandlerError(HandlerError),
     ActionApplied(Action),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompletionRequest {
+    exact_tokens: Vec<String>,
+    partial: String,
 }
 
 impl Repl {
@@ -180,6 +187,62 @@ impl Repl {
         line.split_whitespace().map(str::to_string).collect()
     }
 
+    fn parse_completion_request(&self, line: &str) -> Option<CompletionRequest> {
+        let line = line.trim_end_matches(['\n', '\r']);
+        let q_count = line.chars().filter(|&c| c == '?').count();
+        if q_count != 1 || !line.ends_with('?') {
+            return None;
+        }
+
+        let prefix = &line[..line.len() - 1];
+        if prefix.trim().is_empty() {
+            return Some(CompletionRequest {
+                exact_tokens: Vec::new(),
+                partial: String::new(),
+            });
+        }
+
+        if prefix.chars().last().is_some_and(char::is_whitespace) {
+            return Some(CompletionRequest {
+                exact_tokens: prefix.split_whitespace().map(str::to_string).collect(),
+                partial: String::new(),
+            });
+        }
+
+        let mut tokens = prefix.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let partial = tokens.pop().unwrap_or_default();
+        Some(CompletionRequest {
+            exact_tokens: tokens,
+            partial,
+        })
+    }
+
+    fn complete_line(&self, line: &str) -> Result<Option<Vec<String>>, ReplError> {
+        let req = match self.parse_completion_request(line) {
+            Some(req) => req,
+            None => return Ok(None),
+        };
+
+        let mode = self.current_mode()?;
+        let mut state = mode.root_state();
+
+        for token in &req.exact_tokens {
+            let step = match mode.step(state, token) {
+                Some(step) => step,
+                None => return Ok(Some(Vec::new())),
+            };
+            state = step.next_state;
+        }
+
+        let mut completions = mode
+            .get_completions(state, &req.partial)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        completions.sort();
+        Ok(Some(completions))
+    }
+
     fn apply(&mut self, action: Action) -> Result<Action, ReplError> {
         match action {
             Action::None => Ok(Action::None),
@@ -220,6 +283,10 @@ impl Repl {
     }
 
     pub fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
+        if let Some(completions) = self.complete_line(line)? {
+            return Ok(RunOnceOutcome::Completions(completions));
+        }
+
         let tokens = self.tokenize(line);
         if tokens.is_empty() {
             return Ok(RunOnceOutcome::Noop);
@@ -291,6 +358,11 @@ impl Repl {
                 .map_err(|e| io::Error::other(format!("repl runtime error: {:?}", e)))?
             {
                 RunOnceOutcome::Noop => {}
+                RunOnceOutcome::Completions(items) => {
+                    for item in items {
+                        println!("{}", item);
+                    }
+                }
                 RunOnceOutcome::UnknownCommand => {
                     println!("unknown command");
                 }
@@ -538,6 +610,86 @@ mod tests {
 
         assert_eq!(repl.run_once("").unwrap(), RunOnceOutcome::Noop);
         assert_eq!(repl.run_once("   ").unwrap(), RunOnceOutcome::Noop);
+    }
+
+    #[test]
+    fn run_once_question_returns_root_completions() {
+        let mut repl = Repl::new();
+        let show = build_cmd(&["show"], 0);
+        let write = build_cmd(&["write"], 0);
+        repl.register_mode_command(0, &write, noop_handler()).unwrap();
+        repl.register_mode_command(0, &show, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("?").unwrap(),
+            RunOnceOutcome::Completions(vec!["show".to_string(), "write".to_string()])
+        );
+    }
+
+    #[test]
+    fn run_once_question_after_whitespace_completes_next_token() {
+        let mut repl = Repl::new();
+        let show_ip = build_cmd(&["show", "ip"], 0);
+        let show_version = build_cmd(&["show", "version"], 0);
+        repl.register_mode_command(0, &show_version, noop_handler()).unwrap();
+        repl.register_mode_command(0, &show_ip, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("show ?").unwrap(),
+            RunOnceOutcome::Completions(vec!["ip".to_string(), "version".to_string()])
+        );
+    }
+
+    #[test]
+    fn run_once_inline_question_completes_partial_token() {
+        let mut repl = Repl::new();
+        let delete_db = build_cmd(&["delete-db"], 0);
+        let describe = build_cmd(&["describe"], 0);
+        repl.register_mode_command(0, &delete_db, noop_handler()).unwrap();
+        repl.register_mode_command(0, &describe, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("de?").unwrap(),
+            RunOnceOutcome::Completions(vec!["delete-db".to_string(), "describe".to_string()])
+        );
+    }
+
+    #[test]
+    fn run_once_completion_uses_abbrev_semantics_for_prior_tokens() {
+        let mut repl = Repl::new();
+        let route = build_cmd(&["show", "ip", "route"], 0);
+        let iface = build_cmd(&["show", "ip", "interface"], 0);
+        repl.register_mode_command(0, &route, noop_handler()).unwrap();
+        repl.register_mode_command(0, &iface, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("sh ip ?").unwrap(),
+            RunOnceOutcome::Completions(vec!["interface".to_string(), "route".to_string()])
+        );
+    }
+
+    #[test]
+    fn run_once_completion_invalid_prefix_path_returns_empty_completions() {
+        let mut repl = Repl::new();
+        let show = build_cmd(&["show"], 0);
+        repl.register_mode_command(0, &show, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("bogus ?").unwrap(),
+            RunOnceOutcome::Completions(Vec::new())
+        );
+    }
+
+    #[test]
+    fn run_once_completion_on_terminal_state_returns_empty_completions() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+        repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("show version ?").unwrap(),
+            RunOnceOutcome::Completions(Vec::new())
+        );
     }
 
     #[test]

@@ -36,3 +36,26 @@ fn public_repl_meta_exit_returns_exit_action_at_root() {
     let outcome = repl.run_once("exit").expect("run_once");
     assert_eq!(outcome, RunOnceOutcome::ActionApplied(Action::Exit));
 }
+
+#[test]
+fn public_repl_question_returns_completions() {
+    let mut repl = Repl::new();
+
+    let mut builder = CmdBuilder::new();
+    builder.literals(&["write"]);
+    let write_cmd = builder.build();
+    repl.register_mode_command(0, &write_cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register write");
+
+    let mut builder = CmdBuilder::new();
+    builder.literals(&["show"]);
+    let show_cmd = builder.build();
+    repl.register_mode_command(0, &show_cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register show");
+
+    let outcome = repl.run_once("?").expect("run_once");
+    assert_eq!(
+        outcome,
+        RunOnceOutcome::Completions(vec!["show".to_string(), "write".to_string()])
+    );
+}
