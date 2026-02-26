@@ -1,5 +1,5 @@
-type StateId = usize;
-type CommandId = u32;
+pub(crate) type StateId = usize;
+pub(crate) type CommandId = u32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Edge {
@@ -14,7 +14,7 @@ struct State {
 }
 
 #[derive(Debug, Default)]
-struct Sm {
+pub(crate) struct Sm {
     // Initial state is 0.
     states: Vec<State>,
 }
@@ -30,7 +30,21 @@ struct StateScan<'a> {
     completions: Vec<&'a str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CmdInsertError {
+    InvalidState(StateId),
+    MultipleVarEdges(StateId),
+    DuplicateLiteralEdges { state: StateId, literal: String },
+    DuplicateCommandPath { existing: CommandId, attempted: CommandId },
+}
+
 impl Sm {
+    pub(crate) fn new() -> Self {
+        Self {
+            states: vec![State::default()],
+        }
+    }
+
     fn scan_state<'a>(
         &'a self,
         current_state: StateId,
@@ -80,14 +94,18 @@ impl Sm {
     }
 
     /// Get a list of all possible next literal tokens.
-    fn get_completions<'a>(&'a self, current_state: StateId, partial_token: &str) -> Vec<&'a str> {
+    pub(crate) fn get_completions<'a>(
+        &'a self,
+        current_state: StateId,
+        partial_token: &str,
+    ) -> Vec<&'a str> {
         self.scan_state(current_state, partial_token, true)
             .map(|scan| scan.completions)
             .unwrap_or_default()
     }
 
     /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
-    fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
+    pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
         let scan = self.scan_state(current_state, input_token, false)?;
 
         if scan.exact_literal_count == 1 {
@@ -109,6 +127,116 @@ impl Sm {
         }
 
         None
+    }
+
+    /// Starting at `current_state`, if there is a literal edge for `literal` already, return
+    /// the state it points to. Otherwise, create a new edge and state for it.
+    pub(crate) fn ensure_literal_edge(
+        &mut self,
+        current_state: StateId,
+        literal: &str,
+    ) -> Result<StateId, CmdInsertError> {
+        let state = self
+            .states
+            .get(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut existing: Option<StateId> = None;
+        let mut literal_count = 0usize;
+        for (edge, next_state) in &state.edges {
+            if let Edge::Literal(existing_literal) = edge {
+                if existing_literal == literal {
+                    literal_count += 1;
+                    if literal_count == 1 {
+                        existing = Some(*next_state);
+                    }
+                }
+            }
+        }
+
+        if literal_count > 1 {
+            return Err(CmdInsertError::DuplicateLiteralEdges {
+                state: current_state,
+                literal: literal.to_string(),
+            });
+        }
+        if let Some(state_id) = existing {
+            return Ok(state_id);
+        }
+
+        let new_state = self.states.len();
+        self.states.push(State::default());
+        self.states[current_state]
+            .edges
+            .push((Edge::Literal(literal.to_string()), new_state));
+        Ok(new_state)
+    }
+
+    /// Starting at `current_state`, if there is a var edge return the state it points to. Otherwise,
+    /// create a new edge and state for it, returning the new state.
+    pub(crate) fn ensure_var_edge(
+        &mut self,
+        current_state: StateId,
+    ) -> Result<StateId, CmdInsertError> {
+        let state = self
+            .states
+            .get(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut existing: Option<StateId> = None;
+        let mut var_count = 0usize;
+        for (edge, next_state) in &state.edges {
+            if matches!(edge, Edge::Var) {
+                var_count += 1;
+                if var_count == 1 {
+                    existing = Some(*next_state);
+                }
+            }
+        }
+
+        if var_count > 1 {
+            return Err(CmdInsertError::MultipleVarEdges(current_state));
+        }
+        if let Some(state_id) = existing {
+            return Ok(state_id);
+        }
+
+        let new_state = self.states.len();
+        self.states.push(State::default());
+        self.states[current_state].edges.push((Edge::Var, new_state));
+        Ok(new_state)
+    }
+
+    pub(crate) fn set_accept(
+        &mut self,
+        state_id: StateId,
+        id: CommandId,
+    ) -> Result<(), CmdInsertError> {
+        let state = self
+            .states
+            .get_mut(state_id)
+            .ok_or(CmdInsertError::InvalidState(state_id))?;
+
+        if let Some(existing) = state.accept {
+            return Err(CmdInsertError::DuplicateCommandPath {
+                existing,
+                attempted: id,
+            });
+        }
+
+        state.accept = Some(id);
+        Ok(())
+    }
+
+    pub(crate) fn accept_at(
+        &self,
+        state_id: StateId,
+    ) -> Result<Option<CommandId>, CmdInsertError> {
+        let state = self
+            .states
+            .get(state_id)
+            .ok_or(CmdInsertError::InvalidState(state_id))?;
+        Ok(state.accept)
     }
 }
 
@@ -213,5 +341,69 @@ mod tests {
 
         assert_eq!(sm.states[0].accept, None);
         assert_eq!(sm.states[1].accept, Some(42));
+    }
+
+    #[test]
+    fn ensure_literal_edge_reuses_existing_edge() {
+        let mut sm = sm_with_states(vec![State {
+            edges: vec![(lit("show"), 1)],
+            accept: None,
+        }, State::default()]);
+
+        let first = sm.ensure_literal_edge(0, "show").unwrap();
+        let second = sm.ensure_literal_edge(0, "show").unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+        assert_eq!(sm.states[0].edges.len(), 1);
+    }
+
+    #[test]
+    fn ensure_var_edge_reuses_existing_edge() {
+        let mut sm = sm_with_states(vec![State {
+            edges: vec![(Edge::Var, 1)],
+            accept: None,
+        }, State::default()]);
+
+        let first = sm.ensure_var_edge(0).unwrap();
+        let second = sm.ensure_var_edge(0).unwrap();
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 1);
+        assert_eq!(sm.states[0].edges.len(), 1);
+    }
+
+    #[test]
+    fn set_accept_rejects_duplicate_terminal_registration() {
+        let mut sm = sm_with_states(vec![State::default()]);
+
+        sm.set_accept(0, 10).unwrap();
+        let err = sm.set_accept(0, 11).unwrap_err();
+
+        assert_eq!(
+            err,
+            CmdInsertError::DuplicateCommandPath {
+                existing: 10,
+                attempted: 11
+            }
+        );
+    }
+
+    #[test]
+    fn registration_helpers_return_invalid_state_error() {
+        let mut sm = Sm::new();
+
+        assert_eq!(
+            sm.ensure_literal_edge(99, "show").unwrap_err(),
+            CmdInsertError::InvalidState(99)
+        );
+        assert_eq!(
+            sm.ensure_var_edge(99).unwrap_err(),
+            CmdInsertError::InvalidState(99)
+        );
+        assert_eq!(
+            sm.set_accept(99, 1).unwrap_err(),
+            CmdInsertError::InvalidState(99)
+        );
     }
 }
