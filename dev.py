@@ -71,14 +71,11 @@ def run_command(cmd: list[str], cwd: Path, env: dict[str, str]) -> None:
         sys.exit(exc.returncode)
 
 
-def build_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
+def build_rust(repo_root: Path, package: str, pkg_dir: Path, artifact: str) -> None:
     bld_root = repo_root / "bld" / package
-    bin_root = repo_root / "bin"
     ensure_dir(bld_root)
-    ensure_dir(bin_root)
 
     cargo_toml = pkg_dir / "Cargo.toml"
-    bin_name = read_cargo_package_name(cargo_toml)
 
     env = os.environ.copy()
     env["CARGO_TARGET_DIR"] = str(bld_root)
@@ -86,7 +83,20 @@ def build_rust(repo_root: Path, package: str, pkg_dir: Path) -> None:
         f'{env.get("RUSTFLAGS", "")} --remap-path-prefix src={pkg_dir / "src"}'
     ).strip()
     cmd = ["cargo", "build", "--manifest-path", str(cargo_toml)]
+    if artifact == "lib":
+        cmd.insert(2, "--lib")
     run_command(cmd, cwd=repo_root, env=env)
+
+    if artifact == "lib":
+        return
+
+    if artifact != "bin":
+        eprint(f'unsupported rust artifact: {artifact} (expected "bin" or "lib")')
+        sys.exit(1)
+
+    bin_root = repo_root / "bin"
+    ensure_dir(bin_root)
+    bin_name = read_cargo_package_name(cargo_toml)
 
     exe_suffix = ".exe" if os.name == "nt" else ""
     built_bin = bld_root / "debug" / f"{bin_name}{exe_suffix}"
@@ -135,7 +145,15 @@ def cmd_build(args: argparse.Namespace) -> None:
         eprint(f"unsupported package type: {pkg_type}")
         sys.exit(1)
 
-    build_rust(repo_root, args.package, pkg_dir)
+    artifact = spec.get("artifact", "bin")
+    if not isinstance(artifact, str):
+        eprint(f"invalid rust build spec: artifact must be a string in {spec_path}")
+        sys.exit(1)
+    if artifact not in {"bin", "lib"}:
+        eprint(f'unsupported rust artifact: {artifact} (expected "bin" or "lib")')
+        sys.exit(1)
+
+    build_rust(repo_root, args.package, pkg_dir, artifact)
 
 
 def cmd_test(args: argparse.Namespace) -> None:
