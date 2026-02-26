@@ -2,6 +2,7 @@ use crate::{cmd, sm};
 
 pub(crate) type ModeId = u32;
 
+#[derive(Debug)]
 pub(crate) struct Mode {
     id: ModeId,
     name: String,
