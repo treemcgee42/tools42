@@ -1,4 +1,5 @@
 use crate::{cmd, mode, sm};
+use std::io::{self, Write};
 
 pub(crate) type ModeId = mode::ModeId;
 pub(crate) type CommandId = sm::CommandId;
@@ -138,6 +139,18 @@ impl Repl {
         Ok(command_id)
     }
 
+    fn prompt(&self) -> Result<String, ReplError> {
+        if self.stack.is_empty() {
+            return Err(ReplError::EmptyModeStack);
+        }
+
+        let mut names = Vec::with_capacity(self.stack.len());
+        for mode_id in &self.stack {
+            names.push(self.get_mode(*mode_id)?.name().to_string());
+        }
+        Ok(format!("{}> ", names.join("/")))
+    }
+
     fn tokenize(&self, line: &str) -> ParsedInputs {
         line.split_whitespace().map(str::to_string).collect()
     }
@@ -228,6 +241,46 @@ impl Repl {
 
         let applied = self.apply(action)?;
         Ok(RunOnceOutcome::ActionApplied(applied))
+    }
+
+    pub(crate) fn run(&mut self) -> io::Result<()> {
+        let stdin = io::stdin();
+        let mut stdout = io::stdout();
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let prompt = self
+                .prompt()
+                .map_err(|e| io::Error::other(format!("repl prompt error: {:?}", e)))?;
+            print!("{}", prompt);
+            stdout.flush()?;
+
+            let bytes = stdin.read_line(&mut line)?;
+            if bytes == 0 {
+                break;
+            }
+
+            match self
+                .run_once(&line)
+                .map_err(|e| io::Error::other(format!("repl runtime error: {:?}", e)))?
+            {
+                RunOnceOutcome::Noop => {}
+                RunOnceOutcome::UnknownCommand => {
+                    println!("unknown command");
+                }
+                RunOnceOutcome::IncompleteCommand => {
+                    println!("incomplete command");
+                }
+                RunOnceOutcome::HandlerError(err) => {
+                    println!("handler error: {}", err.0);
+                }
+                RunOnceOutcome::ActionApplied(Action::Exit) => break,
+                RunOnceOutcome::ActionApplied(_) => {}
+            }
+        }
+
+        Ok(())
     }
 
     #[cfg(test)]
@@ -347,6 +400,17 @@ mod tests {
 
         let mode = repl.current_mode_mut().unwrap();
         assert_eq!(mode.name(), "global");
+    }
+
+    #[test]
+    fn prompt_formats_mode_stack_path() {
+        let mut repl = Repl::new();
+        let config = repl.add_mode("config");
+        let iface = repl.add_mode("interface");
+        repl.push_mode(config).unwrap();
+        repl.push_mode(iface).unwrap();
+
+        assert_eq!(repl.prompt().unwrap(), "global/config/interface> ");
     }
 
     #[test]
