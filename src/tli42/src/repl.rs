@@ -334,6 +334,15 @@ impl Repl {
                 doc: doc.map(str::to_string),
             })
             .collect::<Vec<_>>();
+        if completions.is_empty()
+            && req.partial.is_empty()
+            && let Some(doc) = mode.command_doc_at(state)?
+        {
+            completions.push(CompletionItem {
+                token: String::new(),
+                doc: Some(doc.to_string()),
+            });
+        }
         completions.sort_by(|a, b| a.token.cmp(&b.token));
         Ok(Some(completions))
     }
@@ -455,9 +464,10 @@ impl Repl {
                 RunOnceOutcome::Noop => {}
                 RunOnceOutcome::Completions(items) => {
                     for item in items {
-                        match item.doc {
-                            Some(doc) => println!("{} - {}", item.token, doc),
-                            None => println!("{}", item.token),
+                        match (item.token.is_empty(), item.doc) {
+                            (true, Some(doc)) => println!("{}", doc),
+                            (false, Some(doc)) => println!("{} - {}", item.token, doc),
+                            (_, None) => println!("{}", item.token),
                         }
                     }
                 }
@@ -797,6 +807,23 @@ mod tests {
         assert_eq!(
             repl.run_once("show version ?").unwrap(),
             RunOnceOutcome::Completions(Vec::new())
+        );
+    }
+
+    #[test]
+    fn run_once_completion_on_terminal_state_returns_command_doc_when_present() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+        repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+        repl.set_command_doc(0, "show version", "show software version")
+            .unwrap();
+
+        assert_eq!(
+            repl.run_once("show version ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: String::new(),
+                doc: Some("show software version".to_string()),
+            }])
         );
     }
 
