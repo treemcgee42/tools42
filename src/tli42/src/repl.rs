@@ -386,6 +386,36 @@ impl Repl {
         result
     }
 
+    fn print_completions(items: Vec<CompletionItem>) {
+        println!();
+        println!("Possible completions:");
+
+        if items.is_empty() {
+            println!("  (none)");
+            println!();
+            return;
+        }
+
+        let width = items
+            .iter()
+            .filter(|item| !item.token.is_empty())
+            .map(|item| item.token.len())
+            .max()
+            .unwrap_or(0);
+
+        for item in items {
+            match (item.token.is_empty(), item.doc) {
+                (true, Some(doc)) => println!("  {}", doc),
+                (false, Some(doc)) => {
+                    println!("  {:<width$}  {}", item.token, doc, width = width);
+                }
+                (_, None) => println!("  {}", item.token),
+            }
+        }
+
+        println!();
+    }
+
     pub fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
         if let Some(completions) = self.complete_line(line)? {
             return Ok(RunOnceOutcome::Completions(completions));
@@ -463,13 +493,7 @@ impl Repl {
             {
                 RunOnceOutcome::Noop => {}
                 RunOnceOutcome::Completions(items) => {
-                    for item in items {
-                        match (item.token.is_empty(), item.doc) {
-                            (true, Some(doc)) => println!("{}", doc),
-                            (false, Some(doc)) => println!("{} - {}", item.token, doc),
-                            (_, None) => println!("{}", item.token),
-                        }
-                    }
+                    Self::print_completions(items);
                 }
                 RunOnceOutcome::UnknownCommand => {
                     println!("unknown command");
