@@ -62,11 +62,43 @@ impl Mode {
         self.sm.get_completions(current_state, partial_token)
     }
 
+    pub(crate) fn get_completions_with_docs<'a>(
+        &'a self,
+        current_state: sm::StateId,
+        partial_token: &str,
+    ) -> Vec<(&'a str, Option<&'a str>)> {
+        self.sm.get_completions_with_docs(current_state, partial_token)
+    }
+
     pub(crate) fn accept_at(
         &self,
         state_id: sm::StateId,
     ) -> Result<Option<sm::CommandId>, sm::CmdInsertError> {
         self.sm.accept_at(state_id)
+    }
+
+    pub(crate) fn set_literal_edge_doc(
+        &mut self,
+        current_state: sm::StateId,
+        literal: &str,
+        doc: String,
+    ) -> Result<bool, sm::CmdInsertError> {
+        self.sm.set_literal_edge_doc(current_state, literal, doc)
+    }
+
+    pub(crate) fn set_command_doc(
+        &mut self,
+        state_id: sm::StateId,
+        doc: String,
+    ) -> Result<bool, sm::CmdInsertError> {
+        self.sm.set_command_doc(state_id, doc)
+    }
+
+    pub(crate) fn command_doc_at(
+        &self,
+        state_id: sm::StateId,
+    ) -> Result<Option<&str>, sm::CmdInsertError> {
+        self.sm.command_doc_at(state_id)
     }
 }
 

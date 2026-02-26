@@ -7,6 +7,19 @@ enum Edge {
     Var,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EdgeLink {
+    edge: Edge,
+    next_state: StateId,
+    doc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AcceptMeta {
+    command_id: CommandId,
+    doc: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MatchedEdgeKind {
     Literal,
@@ -21,8 +34,8 @@ pub(crate) struct StepResult {
 
 #[derive(Debug, Default)]
 struct State {
-    edges: Vec<(Edge, StateId)>,
-    accept: Option<CommandId>,
+    edges: Vec<EdgeLink>,
+    accept: Option<AcceptMeta>,
 }
 
 #[derive(Debug, Default)]
@@ -35,11 +48,13 @@ pub(crate) struct Sm {
 struct StateScan<'a> {
     exact_literal: Option<StateId>,
     exact_literal_count: usize,
+    exact_literal_doc: Option<&'a str>,
     prefix_literal: Option<StateId>,
     prefix_literal_count: usize,
+    prefix_literal_doc: Option<&'a str>,
     var_match: Option<StateId>,
     var_match_count: usize,
-    completions: Vec<&'a str>,
+    completions: Vec<(&'a str, Option<&'a str>)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,35 +81,40 @@ impl Sm {
         let state = self.states.get(current_state)?;
         let mut scan = StateScan::default();
 
-        for (edge, state_id) in &state.edges {
-            match edge {
+        for link in &state.edges {
+            match &link.edge {
                 Edge::Literal(complete_token) => {
+                    let edge_doc = link.doc.as_deref();
                     if collect_completions && complete_token.starts_with(input_token) {
-                        scan.completions.push(complete_token.as_str());
+                        scan.completions.push((complete_token.as_str(), edge_doc));
                     }
 
                     if complete_token == input_token {
                         scan.exact_literal_count += 1;
                         if scan.exact_literal_count == 1 {
-                            scan.exact_literal = Some(*state_id);
+                            scan.exact_literal = Some(link.next_state);
+                            scan.exact_literal_doc = edge_doc;
                         } else {
                             scan.exact_literal = None;
+                            scan.exact_literal_doc = None;
                         }
                     }
 
                     if complete_token.starts_with(input_token) {
                         scan.prefix_literal_count += 1;
                         if scan.prefix_literal_count == 1 {
-                            scan.prefix_literal = Some(*state_id);
+                            scan.prefix_literal = Some(link.next_state);
+                            scan.prefix_literal_doc = edge_doc;
                         } else {
                             scan.prefix_literal = None;
+                            scan.prefix_literal_doc = None;
                         }
                     }
                 }
                 Edge::Var => {
                     scan.var_match_count += 1;
                     if scan.var_match_count == 1 {
-                        scan.var_match = Some(*state_id);
+                        scan.var_match = Some(link.next_state);
                     } else {
                         scan.var_match = None;
                     }
@@ -111,6 +131,21 @@ impl Sm {
         current_state: StateId,
         partial_token: &str,
     ) -> Vec<&'a str> {
+        self.scan_state(current_state, partial_token, true)
+            .map(|scan| {
+                scan.completions
+                    .into_iter()
+                    .map(|(token, _)| token)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn get_completions_with_docs<'a>(
+        &'a self,
+        current_state: StateId,
+        partial_token: &str,
+    ) -> Vec<(&'a str, Option<&'a str>)> {
         self.scan_state(current_state, partial_token, true)
             .map(|scan| scan.completions)
             .unwrap_or_default()
@@ -169,12 +204,12 @@ impl Sm {
 
         let mut existing: Option<StateId> = None;
         let mut literal_count = 0usize;
-        for (edge, next_state) in &state.edges {
-            if let Edge::Literal(existing_literal) = edge {
+        for link in &state.edges {
+            if let Edge::Literal(existing_literal) = &link.edge {
                 if existing_literal == literal {
                     literal_count += 1;
                     if literal_count == 1 {
-                        existing = Some(*next_state);
+                        existing = Some(link.next_state);
                     }
                 }
             }
@@ -192,9 +227,11 @@ impl Sm {
 
         let new_state = self.states.len();
         self.states.push(State::default());
-        self.states[current_state]
-            .edges
-            .push((Edge::Literal(literal.to_string()), new_state));
+        self.states[current_state].edges.push(EdgeLink {
+            edge: Edge::Literal(literal.to_string()),
+            next_state: new_state,
+            doc: None,
+        });
         Ok(new_state)
     }
 
@@ -211,11 +248,11 @@ impl Sm {
 
         let mut existing: Option<StateId> = None;
         let mut var_count = 0usize;
-        for (edge, next_state) in &state.edges {
-            if matches!(edge, Edge::Var) {
+        for link in &state.edges {
+            if matches!(link.edge, Edge::Var) {
                 var_count += 1;
                 if var_count == 1 {
-                    existing = Some(*next_state);
+                    existing = Some(link.next_state);
                 }
             }
         }
@@ -229,7 +266,11 @@ impl Sm {
 
         let new_state = self.states.len();
         self.states.push(State::default());
-        self.states[current_state].edges.push((Edge::Var, new_state));
+        self.states[current_state].edges.push(EdgeLink {
+            edge: Edge::Var,
+            next_state: new_state,
+            doc: None,
+        });
         Ok(new_state)
     }
 
@@ -243,14 +284,17 @@ impl Sm {
             .get_mut(state_id)
             .ok_or(CmdInsertError::InvalidState(state_id))?;
 
-        if let Some(existing) = state.accept {
+        if let Some(existing) = &state.accept {
             return Err(CmdInsertError::DuplicateCommandPath {
-                existing,
+                existing: existing.command_id,
                 attempted: id,
             });
         }
 
-        state.accept = Some(id);
+        state.accept = Some(AcceptMeta {
+            command_id: id,
+            doc: None,
+        });
         Ok(())
     }
 
@@ -262,7 +306,67 @@ impl Sm {
             .states
             .get(state_id)
             .ok_or(CmdInsertError::InvalidState(state_id))?;
-        Ok(state.accept)
+        Ok(state.accept.as_ref().map(|a| a.command_id))
+    }
+
+    pub(crate) fn set_literal_edge_doc(
+        &mut self,
+        current_state: StateId,
+        literal: &str,
+        doc: String,
+    ) -> Result<bool, CmdInsertError> {
+        let state = self
+            .states
+            .get_mut(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut match_idx: Option<usize> = None;
+        for (idx, link) in state.edges.iter().enumerate() {
+            if let Edge::Literal(existing_literal) = &link.edge {
+                if existing_literal == literal {
+                    if match_idx.is_some() {
+                        return Err(CmdInsertError::DuplicateLiteralEdges {
+                            state: current_state,
+                            literal: literal.to_string(),
+                        });
+                    }
+                    match_idx = Some(idx);
+                }
+            }
+        }
+
+        if let Some(idx) = match_idx {
+            state.edges[idx].doc = Some(doc);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn set_command_doc(
+        &mut self,
+        state_id: StateId,
+        doc: String,
+    ) -> Result<bool, CmdInsertError> {
+        let state = self
+            .states
+            .get_mut(state_id)
+            .ok_or(CmdInsertError::InvalidState(state_id))?;
+        let Some(accept) = &mut state.accept else {
+            return Ok(false);
+        };
+        accept.doc = Some(doc);
+        Ok(true)
+    }
+
+    pub(crate) fn command_doc_at(
+        &self,
+        state_id: StateId,
+    ) -> Result<Option<&str>, CmdInsertError> {
+        let state = self
+            .states
+            .get(state_id)
+            .ok_or(CmdInsertError::InvalidState(state_id))?;
+        Ok(state.accept.as_ref().and_then(|a| a.doc.as_deref()))
     }
 }
 
@@ -270,8 +374,20 @@ impl Sm {
 mod tests {
     use super::*;
 
-    fn lit(s: &str) -> Edge {
-        Edge::Literal(s.to_string())
+    fn lit_edge(s: &str, next_state: StateId) -> EdgeLink {
+        EdgeLink {
+            edge: Edge::Literal(s.to_string()),
+            next_state,
+            doc: None,
+        }
+    }
+
+    fn var_edge(next_state: StateId) -> EdgeLink {
+        EdgeLink {
+            edge: Edge::Var,
+            next_state,
+            doc: None,
+        }
     }
 
     fn sm_with_states(states: Vec<State>) -> Sm {
@@ -286,7 +402,7 @@ mod tests {
     #[test]
     fn get_completions_returns_matching_literals_only() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2), (lit("shell"), 3)],
+            edges: vec![lit_edge("show", 1), var_edge(2), lit_edge("shell", 3)],
             accept: None,
         }]);
 
@@ -297,7 +413,7 @@ mod tests {
     #[test]
     fn next_state_prefers_exact_literal_over_var() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            edges: vec![lit_edge("show", 1), var_edge(2)],
             accept: None,
         }]);
 
@@ -307,7 +423,7 @@ mod tests {
     #[test]
     fn next_state_accepts_unique_literal_prefix() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            edges: vec![lit_edge("show", 1), var_edge(2)],
             accept: None,
         }]);
 
@@ -317,7 +433,7 @@ mod tests {
     #[test]
     fn next_state_rejects_ambiguous_literal_prefix() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (lit("shell"), 2), (Edge::Var, 3)],
+            edges: vec![lit_edge("show", 1), lit_edge("shell", 2), var_edge(3)],
             accept: None,
         }]);
 
@@ -327,7 +443,7 @@ mod tests {
     #[test]
     fn next_state_falls_back_to_var_when_no_literal_matches() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            edges: vec![lit_edge("show", 1), var_edge(2)],
             accept: None,
         }]);
 
@@ -337,7 +453,7 @@ mod tests {
     #[test]
     fn next_state_rejects_multiple_var_edges() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(Edge::Var, 1), (Edge::Var, 2)],
+            edges: vec![var_edge(1), var_edge(2)],
             accept: None,
         }]);
 
@@ -347,7 +463,7 @@ mod tests {
     #[test]
     fn step_reports_literal_match_kind() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            edges: vec![lit_edge("show", 1), var_edge(2)],
             accept: None,
         }]);
 
@@ -363,7 +479,7 @@ mod tests {
     #[test]
     fn step_reports_var_match_kind() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (Edge::Var, 2)],
+            edges: vec![lit_edge("show", 1), var_edge(2)],
             accept: None,
         }]);
 
@@ -379,7 +495,7 @@ mod tests {
     #[test]
     fn step_reuses_next_state_precedence() {
         let sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1), (lit("shell"), 2), (Edge::Var, 3)],
+            edges: vec![lit_edge("show", 1), lit_edge("shell", 2), var_edge(3)],
             accept: None,
         }]);
 
@@ -410,18 +526,27 @@ mod tests {
             },
             State {
                 edges: vec![],
-                accept: Some(42),
+                accept: Some(AcceptMeta {
+                    command_id: 42,
+                    doc: None,
+                }),
             },
         ]);
 
         assert_eq!(sm.states[0].accept, None);
-        assert_eq!(sm.states[1].accept, Some(42));
+        assert_eq!(
+            sm.states[1].accept,
+            Some(AcceptMeta {
+                command_id: 42,
+                doc: None
+            })
+        );
     }
 
     #[test]
     fn ensure_literal_edge_reuses_existing_edge() {
         let mut sm = sm_with_states(vec![State {
-            edges: vec![(lit("show"), 1)],
+            edges: vec![lit_edge("show", 1)],
             accept: None,
         }, State::default()]);
 
@@ -436,7 +561,7 @@ mod tests {
     #[test]
     fn ensure_var_edge_reuses_existing_edge() {
         let mut sm = sm_with_states(vec![State {
-            edges: vec![(Edge::Var, 1)],
+            edges: vec![var_edge(1)],
             accept: None,
         }, State::default()]);
 

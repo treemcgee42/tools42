@@ -31,6 +31,10 @@ pub enum CommandRegistrationError {
 pub enum ReplError {
     InvalidModeId(ModeId),
     InvalidCommandId(CommandId),
+    InvalidDocStem,
+    DocPathNotFound(String),
+    DocPathAmbiguous(String),
+    CommandDocTargetNotTerminal(String),
     EmptyModeStack,
     CannotPopRootMode,
     CmdInsert(CommandRegistrationError),
@@ -66,9 +70,15 @@ pub struct Repl {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionItem {
+    pub token: String,
+    pub doc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOnceOutcome {
     Noop,
-    Completions(Vec<String>),
+    Completions(Vec<CompletionItem>),
     UnknownCommand,
     IncompleteCommand,
     HandlerError(HandlerError),
@@ -171,6 +181,40 @@ impl Repl {
         Ok(command_id)
     }
 
+    pub fn set_edge_doc(
+        &mut self,
+        mode_id: ModeId,
+        stem: &str,
+        doc: impl Into<String>,
+    ) -> Result<(), ReplError> {
+        let tokens = Self::normalize_stem(stem)?;
+        let (parent_state, literal) = self.resolve_edge_doc_target(mode_id, &tokens)?;
+        let mode = self.get_mode_mut(mode_id)?;
+        let found = mode.set_literal_edge_doc(parent_state, literal, doc.into())?;
+        if found {
+            Ok(())
+        } else {
+            Err(ReplError::DocPathNotFound(tokens.join(" ")))
+        }
+    }
+
+    pub fn set_command_doc(
+        &mut self,
+        mode_id: ModeId,
+        stem: &str,
+        doc: impl Into<String>,
+    ) -> Result<(), ReplError> {
+        let tokens = Self::normalize_stem(stem)?;
+        let state = self.resolve_state_path(mode_id, &tokens)?;
+        let mode = self.get_mode_mut(mode_id)?;
+        let found = mode.set_command_doc(state, doc.into())?;
+        if found {
+            Ok(())
+        } else {
+            Err(ReplError::CommandDocTargetNotTerminal(tokens.join(" ")))
+        }
+    }
+
     fn prompt(&self) -> Result<String, ReplError> {
         if self.stack.is_empty() {
             return Err(ReplError::EmptyModeStack);
@@ -185,6 +229,54 @@ impl Repl {
 
     fn tokenize(&self, line: &str) -> ParsedInputs {
         line.split_whitespace().map(str::to_string).collect()
+    }
+
+    fn normalize_stem(stem: &str) -> Result<Vec<String>, ReplError> {
+        let tokens = stem
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if tokens.is_empty() {
+            return Err(ReplError::InvalidDocStem);
+        }
+        Ok(tokens)
+    }
+
+    fn resolve_state_path(&self, mode_id: ModeId, tokens: &[String]) -> Result<sm::StateId, ReplError> {
+        let mode = self.get_mode(mode_id)?;
+        let mut state = mode.root_state();
+        for token in tokens {
+            let Some(step) = mode.step(state, token) else {
+                return Err(ReplError::DocPathNotFound(tokens.join(" ")));
+            };
+            state = step.next_state;
+        }
+        Ok(state)
+    }
+
+    fn resolve_edge_doc_target<'a>(
+        &self,
+        mode_id: ModeId,
+        tokens: &'a [String],
+    ) -> Result<(sm::StateId, &'a str), ReplError> {
+        let mode = self.get_mode(mode_id)?;
+        let mut state = mode.root_state();
+        for token in &tokens[..tokens.len() - 1] {
+            let Some(step) = mode.step(state, token) else {
+                return Err(ReplError::DocPathNotFound(tokens.join(" ")));
+            };
+            state = step.next_state;
+        }
+
+        let literal = tokens.last().expect("tokens validated non-empty");
+        let completions = mode.get_completions(state, literal);
+        if !completions.iter().any(|candidate| *candidate == literal) {
+            if completions.is_empty() {
+                return Err(ReplError::DocPathNotFound(tokens.join(" ")));
+            }
+            return Err(ReplError::DocPathAmbiguous(tokens.join(" ")));
+        }
+        Ok((state, literal.as_str()))
     }
 
     fn parse_completion_request(&self, line: &str) -> Option<CompletionRequest> {
@@ -217,7 +309,7 @@ impl Repl {
         })
     }
 
-    fn complete_line(&self, line: &str) -> Result<Option<Vec<String>>, ReplError> {
+    fn complete_line(&self, line: &str) -> Result<Option<Vec<CompletionItem>>, ReplError> {
         let req = match self.parse_completion_request(line) {
             Some(req) => req,
             None => return Ok(None),
@@ -235,11 +327,14 @@ impl Repl {
         }
 
         let mut completions = mode
-            .get_completions(state, &req.partial)
+            .get_completions_with_docs(state, &req.partial)
             .into_iter()
-            .map(str::to_string)
+            .map(|(token, doc)| CompletionItem {
+                token: token.to_string(),
+                doc: doc.map(str::to_string),
+            })
             .collect::<Vec<_>>();
-        completions.sort();
+        completions.sort_by(|a, b| a.token.cmp(&b.token));
         Ok(Some(completions))
     }
 
@@ -360,7 +455,10 @@ impl Repl {
                 RunOnceOutcome::Noop => {}
                 RunOnceOutcome::Completions(items) => {
                     for item in items {
-                        println!("{}", item);
+                        match item.doc {
+                            Some(doc) => println!("{} - {}", item.token, doc),
+                            None => println!("{}", item.token),
+                        }
                     }
                 }
                 RunOnceOutcome::UnknownCommand => {
@@ -403,6 +501,16 @@ mod tests {
         let mut builder = cmd::CmdBuilder::new();
         builder.literals(literals).positional_args(positional_args);
         builder.build()
+    }
+
+    fn completion_items(tokens: &[&str]) -> Vec<CompletionItem> {
+        tokens
+            .iter()
+            .map(|token| CompletionItem {
+                token: (*token).to_string(),
+                doc: None,
+            })
+            .collect()
     }
 
     #[test]
@@ -622,7 +730,7 @@ mod tests {
 
         assert_eq!(
             repl.run_once("?").unwrap(),
-            RunOnceOutcome::Completions(vec!["show".to_string(), "write".to_string()])
+            RunOnceOutcome::Completions(completion_items(&["show", "write"]))
         );
     }
 
@@ -636,7 +744,7 @@ mod tests {
 
         assert_eq!(
             repl.run_once("show ?").unwrap(),
-            RunOnceOutcome::Completions(vec!["ip".to_string(), "version".to_string()])
+            RunOnceOutcome::Completions(completion_items(&["ip", "version"]))
         );
     }
 
@@ -650,7 +758,7 @@ mod tests {
 
         assert_eq!(
             repl.run_once("de?").unwrap(),
-            RunOnceOutcome::Completions(vec!["delete-db".to_string(), "describe".to_string()])
+            RunOnceOutcome::Completions(completion_items(&["delete-db", "describe"]))
         );
     }
 
@@ -664,7 +772,7 @@ mod tests {
 
         assert_eq!(
             repl.run_once("sh ip ?").unwrap(),
-            RunOnceOutcome::Completions(vec!["interface".to_string(), "route".to_string()])
+            RunOnceOutcome::Completions(completion_items(&["interface", "route"]))
         );
     }
 
@@ -689,6 +797,99 @@ mod tests {
         assert_eq!(
             repl.run_once("show version ?").unwrap(),
             RunOnceOutcome::Completions(Vec::new())
+        );
+    }
+
+    #[test]
+    fn set_edge_doc_annotates_completion_items() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["write"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["show"], 0), noop_handler())
+            .unwrap();
+        repl.set_edge_doc(0, "write", "enter write mode").unwrap();
+
+        assert_eq!(
+            repl.run_once("?").unwrap(),
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: "show".to_string(),
+                    doc: None
+                },
+                CompletionItem {
+                    token: "write".to_string(),
+                    doc: Some("enter write mode".to_string())
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn set_edge_doc_overwrites_existing_doc() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["write"], 0), noop_handler())
+            .unwrap();
+        repl.set_edge_doc(0, "write", "old").unwrap();
+        repl.set_edge_doc(0, "write", "new").unwrap();
+
+        assert_eq!(
+            repl.run_once("?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "write".to_string(),
+                doc: Some("new".to_string())
+            }])
+        );
+    }
+
+    #[test]
+    fn set_edge_doc_rejects_invalid_mode() {
+        let mut repl = Repl::new();
+        assert_eq!(
+            repl.set_edge_doc(99, "write", "doc").unwrap_err(),
+            ReplError::InvalidModeId(99)
+        );
+    }
+
+    #[test]
+    fn set_edge_doc_rejects_invalid_or_missing_stem() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["write"], 0), noop_handler())
+            .unwrap();
+
+        assert_eq!(repl.set_edge_doc(0, "   ", "doc").unwrap_err(), ReplError::InvalidDocStem);
+        assert_eq!(
+            repl.set_edge_doc(0, "missing", "doc").unwrap_err(),
+            ReplError::DocPathNotFound("missing".to_string())
+        );
+    }
+
+    #[test]
+    fn set_command_doc_stores_for_terminal_path() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["show", "version"], 0), noop_handler())
+            .unwrap();
+
+        repl.set_command_doc(0, "show version", "show version help")
+            .unwrap();
+
+        let mode = repl.get_mode(0).unwrap();
+        let show = mode.step(mode.root_state(), "show").unwrap();
+        let version = mode.step(show.next_state, "version").unwrap();
+        assert_eq!(
+            mode.command_doc_at(version.next_state).unwrap(),
+            Some("show version help")
+        );
+    }
+
+    #[test]
+    fn set_command_doc_rejects_non_terminal_path() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["show", "version"], 0), noop_handler())
+            .unwrap();
+
+        assert_eq!(
+            repl.set_command_doc(0, "show", "doc").unwrap_err(),
+            ReplError::CommandDocTargetNotTerminal("show".to_string())
         );
     }
 

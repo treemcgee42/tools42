@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use tli42::cmd::CmdBuilder;
-use tli42::repl::{Action, Repl, RunOnceOutcome};
+use tli42::repl::{Action, CompletionItem, Repl, RunOnceOutcome};
 
 #[test]
 fn public_repl_register_and_run_once_captures_vars() {
@@ -56,6 +56,37 @@ fn public_repl_question_returns_completions() {
     let outcome = repl.run_once("?").expect("run_once");
     assert_eq!(
         outcome,
-        RunOnceOutcome::Completions(vec!["show".to_string(), "write".to_string()])
+        RunOnceOutcome::Completions(vec![
+            CompletionItem {
+                token: "show".to_string(),
+                doc: None,
+            },
+            CompletionItem {
+                token: "write".to_string(),
+                doc: None,
+            },
+        ])
+    );
+}
+
+#[test]
+fn public_repl_question_returns_doc_annotated_completion() {
+    let mut repl = Repl::new();
+
+    let mut builder = CmdBuilder::new();
+    builder.literals(&["write"]);
+    let write_cmd = builder.build();
+    repl.register_mode_command(0, &write_cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register write");
+    repl.set_edge_doc(0, "write", "enter write mode")
+        .expect("set edge doc");
+
+    let outcome = repl.run_once("?").expect("run_once");
+    assert_eq!(
+        outcome,
+        RunOnceOutcome::Completions(vec![CompletionItem {
+            token: "write".to_string(),
+            doc: Some("enter write mode".to_string()),
+        }])
     );
 }
