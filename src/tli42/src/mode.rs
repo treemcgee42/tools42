@@ -30,8 +30,12 @@ impl Mode {
         0
     }
 
-    pub(crate) fn insert_cmd(&mut self, cmd: &cmd::Cmd) -> Result<(), sm::CmdInsertError> {
-        self.sm.insert_cmd(cmd)
+    pub(crate) fn insert_cmd(
+        &mut self,
+        cmd: &cmd::Cmd,
+        command_id: sm::CommandId,
+    ) -> Result<(), sm::CmdInsertError> {
+        self.sm.insert_cmd(cmd, command_id)
     }
 
     pub(crate) fn next_state(
@@ -55,8 +59,8 @@ impl Mode {
 mod tests {
     use super::*;
 
-    fn build_cmd(id: sm::CommandId, literals: &[&str], positional_args: u8) -> cmd::Cmd {
-        let mut builder = cmd::CmdBuilder::new(id);
+    fn build_cmd(literals: &[&str], positional_args: u8) -> cmd::Cmd {
+        let mut builder = cmd::CmdBuilder::new();
         builder.literals(literals).positional_args(positional_args);
         builder.build()
     }
@@ -73,9 +77,9 @@ mod tests {
     #[test]
     fn mode_insert_cmd_delegates_to_sm_and_parses_tokens() {
         let mut mode = Mode::new(1, "exec");
-        let cmd = build_cmd(10, &["show", "ip"], 1);
+        let cmd = build_cmd(&["show", "ip"], 1);
 
-        mode.insert_cmd(&cmd).unwrap();
+        mode.insert_cmd(&cmd, 10).unwrap();
 
         let s1 = mode.next_state(mode.root_state(), "show").unwrap();
         let s2 = mode.next_state(s1, "ip").unwrap();
@@ -91,11 +95,11 @@ mod tests {
         let mut exec = Mode::new(1, "exec");
         let mut config = Mode::new(2, "config");
 
-        let exec_cmd = build_cmd(1, &["show", "version"], 0);
-        let cfg_cmd = build_cmd(2, &["set", "hostname"], 1);
+        let exec_cmd = build_cmd(&["show", "version"], 0);
+        let cfg_cmd = build_cmd(&["set", "hostname"], 1);
 
-        exec.insert_cmd(&exec_cmd).unwrap();
-        config.insert_cmd(&cfg_cmd).unwrap();
+        exec.insert_cmd(&exec_cmd, 1).unwrap();
+        config.insert_cmd(&cfg_cmd, 2).unwrap();
 
         assert_eq!(exec.get_completions(exec.root_state(), "s"), vec!["show"]);
         assert_eq!(config.get_completions(config.root_state(), "s"), vec!["set"]);
@@ -106,11 +110,11 @@ mod tests {
     #[test]
     fn mode_insert_cmd_returns_duplicate_error() {
         let mut mode = Mode::new(1, "exec");
-        let a = build_cmd(1, &["show", "version"], 0);
-        let b = build_cmd(2, &["show", "version"], 0);
+        let a = build_cmd(&["show", "version"], 0);
+        let b = build_cmd(&["show", "version"], 0);
 
-        mode.insert_cmd(&a).unwrap();
-        let err = mode.insert_cmd(&b).unwrap_err();
+        mode.insert_cmd(&a, 1).unwrap();
+        let err = mode.insert_cmd(&b, 2).unwrap_err();
 
         assert_eq!(
             err,
@@ -125,11 +129,11 @@ mod tests {
     fn modes_are_isolated_even_with_same_command_paths() {
         let mut exec = Mode::new(1, "exec");
         let mut config = Mode::new(2, "config");
-        let exec_cmd = build_cmd(10, &["show", "version"], 0);
-        let cfg_cmd = build_cmd(20, &["show", "version"], 0);
+        let exec_cmd = build_cmd(&["show", "version"], 0);
+        let cfg_cmd = build_cmd(&["show", "version"], 0);
 
-        exec.insert_cmd(&exec_cmd).unwrap();
-        config.insert_cmd(&cfg_cmd).unwrap();
+        exec.insert_cmd(&exec_cmd, 10).unwrap();
+        config.insert_cmd(&cfg_cmd, 20).unwrap();
 
         let exec_show = exec.next_state(exec.root_state(), "show").unwrap();
         let exec_version = exec.next_state(exec_show, "version").unwrap();

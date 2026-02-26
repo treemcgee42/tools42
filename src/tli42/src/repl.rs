@@ -1,13 +1,35 @@
-use crate::mode;
+use crate::{cmd, mode, sm};
 
 pub(crate) type ModeId = mode::ModeId;
-pub(crate) type Handler = ();
+pub(crate) type CommandId = sm::CommandId;
+pub(crate) type ParsedInputs = Vec<String>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Action {
+    None,
+    PushMode(ModeId),
+    PopMode,
+    Exit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HandlerError(pub(crate) String);
+
+pub(crate) type HandlerResult = Result<Action, HandlerError>;
+pub(crate) type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReplError {
     InvalidModeId(ModeId),
     EmptyModeStack,
     CannotPopRootMode,
+    CmdInsert(sm::CmdInsertError),
+}
+
+impl From<sm::CmdInsertError> for ReplError {
+    fn from(value: sm::CmdInsertError) -> Self {
+        Self::CmdInsert(value)
+    }
 }
 
 pub(crate) struct Repl {
@@ -75,6 +97,37 @@ impl Repl {
         Ok(self.stack.pop().expect("stack length checked above"))
     }
 
+    pub(crate) fn register_handler(&mut self, handler: Handler) -> CommandId {
+        let id = self.handlers.len() as CommandId;
+        self.handlers.push(handler);
+        id
+    }
+
+    pub(crate) fn register_command_in_mode(
+        &mut self,
+        mode_id: ModeId,
+        cmd: &cmd::Cmd,
+        command_id: CommandId,
+    ) -> Result<(), ReplError> {
+        let mode = self.get_mode_mut(mode_id)?;
+        mode.insert_cmd(cmd, command_id)?;
+        Ok(())
+    }
+
+    pub(crate) fn register_mode_command(
+        &mut self,
+        mode_id: ModeId,
+        cmd: &cmd::Cmd,
+        handler: Handler,
+    ) -> Result<CommandId, ReplError> {
+        let command_id = self.register_handler(handler);
+        if let Err(err) = self.register_command_in_mode(mode_id, cmd, command_id) {
+            let _ = self.handlers.pop();
+            return Err(err);
+        }
+        Ok(command_id)
+    }
+
     #[cfg(test)]
     fn modes_len(&self) -> usize {
         self.modes.len()
@@ -89,6 +142,16 @@ impl Repl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn noop_handler() -> Handler {
+        Box::new(|_, _| Ok(Action::None))
+    }
+
+    fn build_cmd(literals: &[&str], positional_args: u8) -> cmd::Cmd {
+        let mut builder = cmd::CmdBuilder::new();
+        builder.literals(literals).positional_args(positional_args);
+        builder.build()
+    }
 
     #[test]
     fn new_initializes_global_mode_and_stack() {
@@ -182,5 +245,99 @@ mod tests {
 
         let mode = repl.current_mode_mut().unwrap();
         assert_eq!(mode.name(), "global");
+    }
+
+    #[test]
+    fn register_handler_returns_sequential_command_ids() {
+        let mut repl = Repl::new();
+
+        let a = repl.register_handler(noop_handler());
+        let b = repl.register_handler(noop_handler());
+        let c = repl.register_handler(noop_handler());
+
+        assert_eq!(a, 0);
+        assert_eq!(b, 1);
+        assert_eq!(c, 2);
+        assert_eq!(repl.handlers_len(), 3);
+    }
+
+    #[test]
+    fn register_command_in_mode_registers_syntax_with_given_command_id() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+        let command_id = repl.register_handler(noop_handler());
+
+        repl.register_command_in_mode(0, &cmd, command_id).unwrap();
+
+        let mode = repl.get_mode(0).unwrap();
+        let show = mode.next_state(mode.root_state(), "show").unwrap();
+        let version = mode.next_state(show, "version").unwrap();
+        assert!(mode.get_completions(version, "").is_empty());
+    }
+
+    #[test]
+    fn register_mode_command_returns_command_id_and_inserts_command() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "ip"], 1);
+
+        let command_id = repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+
+        assert_eq!(command_id, 0);
+        assert_eq!(repl.handlers_len(), 1);
+
+        let mode = repl.get_mode(0).unwrap();
+        let show = mode.next_state(mode.root_state(), "show").unwrap();
+        let ip = mode.next_state(show, "ip").unwrap();
+        assert!(mode.next_state(ip, "eth0").is_some());
+    }
+
+    #[test]
+    fn register_mode_command_rolls_back_handler_on_duplicate_command_path() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+
+        let first_id = repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+        assert_eq!(first_id, 0);
+        assert_eq!(repl.handlers_len(), 1);
+
+        let err = repl
+            .register_mode_command(0, &cmd, noop_handler())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            ReplError::CmdInsert(sm::CmdInsertError::DuplicateCommandPath {
+                existing: 0,
+                attempted: 1,
+            })
+        );
+        assert_eq!(repl.handlers_len(), 1);
+    }
+
+    #[test]
+    fn register_command_in_mode_invalid_mode_id_returns_repl_error() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show"], 0);
+
+        let err = repl
+            .register_command_in_mode(99, &cmd, 0)
+            .unwrap_err();
+        assert_eq!(err, ReplError::InvalidModeId(99));
+    }
+
+    #[test]
+    fn repl_error_from_cmd_insert_is_wrapped() {
+        let mut repl = Repl::new();
+        let cmd = build_cmd(&["show", "version"], 0);
+
+        repl.register_command_in_mode(0, &cmd, 0).unwrap();
+        let err = repl.register_command_in_mode(0, &cmd, 1).unwrap_err();
+
+        assert_eq!(
+            err,
+            ReplError::CmdInsert(sm::CmdInsertError::DuplicateCommandPath {
+                existing: 0,
+                attempted: 1,
+            })
+        );
     }
 }

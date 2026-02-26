@@ -15,12 +15,9 @@ enum Expr {
     // - etc.
 }
 
-type CmdId = sm::CommandId;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Cmd {
     exprs: Vec<Expr>,
-    id: CmdId,
 }
 
 pub(crate) struct CmdBuilder {
@@ -28,11 +25,10 @@ pub(crate) struct CmdBuilder {
 }
 
 impl CmdBuilder {
-    pub(crate) fn new(id: CmdId) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             cmd: Cmd {
                 exprs: Vec::new(),
-                id,
             },
         }
     }
@@ -93,12 +89,16 @@ impl sm::Sm {
         }
     }
 
-    pub(crate) fn insert_cmd(&mut self, cmd: &Cmd) -> Result<(), sm::CmdInsertError> {
+    pub(crate) fn insert_cmd(
+        &mut self,
+        cmd: &Cmd,
+        command_id: sm::CommandId,
+    ) -> Result<(), sm::CmdInsertError> {
         let mut current_state: sm::StateId = 0;
         for expr in &cmd.exprs {
             current_state = self.insert_expr(current_state, expr)?;
         }
-        self.set_accept(current_state, cmd.id)
+        self.set_accept(current_state, command_id)
     }
 }
 
@@ -108,11 +108,10 @@ mod tests {
 
     #[test]
     fn builder_constructs_concatenated_sequences() {
-        let mut builder = CmdBuilder::new(7);
+        let mut builder = CmdBuilder::new();
         builder.literals(&["show", "ip"]).positional_args(2);
         let cmd = builder.build();
 
-        assert_eq!(cmd.id, 7);
         assert_eq!(
             cmd.exprs,
             vec![
@@ -128,11 +127,11 @@ mod tests {
     #[test]
     fn insert_cmd_creates_path_and_marks_accept() {
         let mut sm = sm::Sm::new();
-        let mut builder = CmdBuilder::new(10);
+        let mut builder = CmdBuilder::new();
         builder.literals(&["show", "ip"]).positional_args(1);
         let cmd = builder.build();
 
-        sm.insert_cmd(&cmd).unwrap();
+        sm.insert_cmd(&cmd, 10).unwrap();
 
         let s1 = sm.next_state(0, "show").unwrap();
         let s2 = sm.next_state(s1, "ip").unwrap();
@@ -144,15 +143,15 @@ mod tests {
     fn insert_cmd_reuses_shared_prefix() {
         let mut sm = sm::Sm::new();
 
-        let mut a = CmdBuilder::new(1);
+        let mut a = CmdBuilder::new();
         a.literals(&["show", "ip", "route"]);
         let cmd_a = a.build();
-        sm.insert_cmd(&cmd_a).unwrap();
+        sm.insert_cmd(&cmd_a, 1).unwrap();
 
-        let mut b = CmdBuilder::new(2);
+        let mut b = CmdBuilder::new();
         b.literals(&["show", "ip", "interface"]);
         let cmd_b = b.build();
-        sm.insert_cmd(&cmd_b).unwrap();
+        sm.insert_cmd(&cmd_b, 2).unwrap();
 
         let show = sm.next_state(0, "show").unwrap();
         let ip = sm.next_state(show, "ip").unwrap();
@@ -167,16 +166,16 @@ mod tests {
     fn insert_cmd_rejects_duplicate_terminal_path() {
         let mut sm = sm::Sm::new();
 
-        let mut a = CmdBuilder::new(1);
+        let mut a = CmdBuilder::new();
         a.literals(&["show", "version"]);
         let cmd_a = a.build();
-        sm.insert_cmd(&cmd_a).unwrap();
+        sm.insert_cmd(&cmd_a, 1).unwrap();
 
-        let mut b = CmdBuilder::new(2);
+        let mut b = CmdBuilder::new();
         b.literals(&["show", "version"]);
         let cmd_b = b.build();
 
-        let err = sm.insert_cmd(&cmd_b).unwrap_err();
+        let err = sm.insert_cmd(&cmd_b, 2).unwrap_err();
         assert_eq!(
             err,
             sm::CmdInsertError::DuplicateCommandPath {
@@ -190,15 +189,15 @@ mod tests {
     fn insert_cmd_allows_var_and_literal_branching() {
         let mut sm = sm::Sm::new();
 
-        let mut a = CmdBuilder::new(1);
+        let mut a = CmdBuilder::new();
         a.literals(&["show"]).positional_args(1);
         let cmd_a = a.build();
-        sm.insert_cmd(&cmd_a).unwrap();
+        sm.insert_cmd(&cmd_a, 1).unwrap();
 
-        let mut b = CmdBuilder::new(2);
+        let mut b = CmdBuilder::new();
         b.literals(&["show", "version"]);
         let cmd_b = b.build();
-        sm.insert_cmd(&cmd_b).unwrap();
+        sm.insert_cmd(&cmd_b, 2).unwrap();
 
         let show = sm.next_state(0, "show").unwrap();
         let var_state = sm.next_state(show, "eth0").unwrap();
