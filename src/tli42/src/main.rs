@@ -1,4 +1,5 @@
 mod cmd;
+mod mode;
 mod sm;
 mod trie;
 
