@@ -1,12 +1,12 @@
 use crate::{cmd, mode, sm};
 use std::io::{self, Write};
 
-pub(crate) type ModeId = mode::ModeId;
-pub(crate) type CommandId = sm::CommandId;
-pub(crate) type ParsedInputs = Vec<String>;
+pub type ModeId = u32;
+pub type CommandId = u32;
+pub type ParsedInputs = Vec<String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Action {
+pub enum Action {
     None,
     PushMode(ModeId),
     PopMode,
@@ -14,34 +14,59 @@ pub(crate) enum Action {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HandlerError(pub(crate) String);
+pub struct HandlerError(pub String);
 
-pub(crate) type HandlerResult = Result<Action, HandlerError>;
-pub(crate) type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
+pub type HandlerResult = Result<Action, HandlerError>;
+pub type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplError {
+pub enum CommandRegistrationError {
+    InvalidState(u32),
+    MultipleVarEdges(u32),
+    DuplicateLiteralEdges { state: u32, literal: String },
+    DuplicateCommandPath { existing: CommandId, attempted: CommandId },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReplError {
     InvalidModeId(ModeId),
     InvalidCommandId(CommandId),
     EmptyModeStack,
     CannotPopRootMode,
-    CmdInsert(sm::CmdInsertError),
+    CmdInsert(CommandRegistrationError),
 }
 
 impl From<sm::CmdInsertError> for ReplError {
     fn from(value: sm::CmdInsertError) -> Self {
-        Self::CmdInsert(value)
+        let mapped = match value {
+            sm::CmdInsertError::InvalidState(state) => CommandRegistrationError::InvalidState(
+                state as u32,
+            ),
+            sm::CmdInsertError::MultipleVarEdges(state) => {
+                CommandRegistrationError::MultipleVarEdges(state as u32)
+            }
+            sm::CmdInsertError::DuplicateLiteralEdges { state, literal } => {
+                CommandRegistrationError::DuplicateLiteralEdges {
+                    state: state as u32,
+                    literal,
+                }
+            }
+            sm::CmdInsertError::DuplicateCommandPath { existing, attempted } => {
+                CommandRegistrationError::DuplicateCommandPath { existing, attempted }
+            }
+        };
+        Self::CmdInsert(mapped)
     }
 }
 
-pub(crate) struct Repl {
+pub struct Repl {
     modes: Vec<mode::Mode>,
     stack: Vec<ModeId>,
     handlers: Vec<Handler>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RunOnceOutcome {
+pub enum RunOnceOutcome {
     Noop,
     UnknownCommand,
     IncompleteCommand,
@@ -50,7 +75,7 @@ pub(crate) enum RunOnceOutcome {
 }
 
 impl Repl {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             modes: vec![mode::Mode::new(0, "global")],
             stack: vec![0],
@@ -58,39 +83,39 @@ impl Repl {
         }
     }
 
-    pub(crate) fn current_mode_id(&self) -> Result<ModeId, ReplError> {
+    pub fn current_mode_id(&self) -> Result<ModeId, ReplError> {
         self.stack.last().copied().ok_or(ReplError::EmptyModeStack)
     }
 
-    pub(crate) fn current_mode(&self) -> Result<&mode::Mode, ReplError> {
+    fn current_mode(&self) -> Result<&mode::Mode, ReplError> {
         let id = self.current_mode_id()?;
         self.get_mode(id)
     }
 
-    pub(crate) fn current_mode_mut(&mut self) -> Result<&mut mode::Mode, ReplError> {
+    fn current_mode_mut(&mut self) -> Result<&mut mode::Mode, ReplError> {
         let id = self.current_mode_id()?;
         self.get_mode_mut(id)
     }
 
-    pub(crate) fn add_mode(&mut self, name: impl Into<String>) -> ModeId {
+    pub fn add_mode(&mut self, name: impl Into<String>) -> ModeId {
         let id = self.modes.len() as ModeId;
         self.modes.push(mode::Mode::new(id, name));
         id
     }
 
-    pub(crate) fn get_mode(&self, id: ModeId) -> Result<&mode::Mode, ReplError> {
+    fn get_mode(&self, id: ModeId) -> Result<&mode::Mode, ReplError> {
         self.modes
             .get(id as usize)
             .ok_or(ReplError::InvalidModeId(id))
     }
 
-    pub(crate) fn get_mode_mut(&mut self, id: ModeId) -> Result<&mut mode::Mode, ReplError> {
+    fn get_mode_mut(&mut self, id: ModeId) -> Result<&mut mode::Mode, ReplError> {
         self.modes
             .get_mut(id as usize)
             .ok_or(ReplError::InvalidModeId(id))
     }
 
-    pub(crate) fn push_mode(&mut self, id: ModeId) -> Result<(), ReplError> {
+    pub fn push_mode(&mut self, id: ModeId) -> Result<(), ReplError> {
         if (id as usize) >= self.modes.len() {
             return Err(ReplError::InvalidModeId(id));
         }
@@ -98,7 +123,7 @@ impl Repl {
         Ok(())
     }
 
-    pub(crate) fn pop_mode(&mut self) -> Result<ModeId, ReplError> {
+    pub fn pop_mode(&mut self) -> Result<ModeId, ReplError> {
         if self.stack.is_empty() {
             return Err(ReplError::EmptyModeStack);
         }
@@ -108,13 +133,13 @@ impl Repl {
         Ok(self.stack.pop().expect("stack length checked above"))
     }
 
-    pub(crate) fn register_handler(&mut self, handler: Handler) -> CommandId {
+    pub fn register_handler(&mut self, handler: Handler) -> CommandId {
         let id = self.handlers.len() as CommandId;
         self.handlers.push(handler);
         id
     }
 
-    pub(crate) fn register_command_in_mode(
+    pub fn register_command_in_mode(
         &mut self,
         mode_id: ModeId,
         cmd: &cmd::Cmd,
@@ -125,7 +150,7 @@ impl Repl {
         Ok(())
     }
 
-    pub(crate) fn register_mode_command(
+    pub fn register_mode_command(
         &mut self,
         mode_id: ModeId,
         cmd: &cmd::Cmd,
@@ -194,7 +219,7 @@ impl Repl {
         result
     }
 
-    pub(crate) fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
+    pub fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
         let tokens = self.tokenize(line);
         if tokens.is_empty() {
             return Ok(RunOnceOutcome::Noop);
@@ -243,7 +268,7 @@ impl Repl {
         Ok(RunOnceOutcome::ActionApplied(applied))
     }
 
-    pub(crate) fn run(&mut self) -> io::Result<()> {
+    pub fn run(&mut self) -> io::Result<()> {
         let stdin = io::stdin();
         let mut stdout = io::stdout();
         let mut line = String::new();
@@ -471,7 +496,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            ReplError::CmdInsert(sm::CmdInsertError::DuplicateCommandPath {
+            ReplError::CmdInsert(CommandRegistrationError::DuplicateCommandPath {
                 existing: 0,
                 attempted: 1,
             })
@@ -500,7 +525,7 @@ mod tests {
 
         assert_eq!(
             err,
-            ReplError::CmdInsert(sm::CmdInsertError::DuplicateCommandPath {
+            ReplError::CmdInsert(CommandRegistrationError::DuplicateCommandPath {
                 existing: 0,
                 attempted: 1,
             })

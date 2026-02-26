@@ -16,16 +16,16 @@ enum Expr {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Cmd {
+pub struct Cmd {
     exprs: Vec<Expr>,
 }
 
-pub(crate) struct CmdBuilder {
+pub struct CmdBuilder {
     cmd: Cmd,
 }
 
 impl CmdBuilder {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             cmd: Cmd {
                 exprs: Vec::new(),
@@ -33,7 +33,7 @@ impl CmdBuilder {
         }
     }
 
-    pub(crate) fn literals(&mut self, literals: &[&str]) -> &mut Self {
+    pub fn literals(&mut self, literals: &[&str]) -> &mut Self {
         if literals.is_empty() {
             return self;
         }
@@ -46,7 +46,7 @@ impl CmdBuilder {
         self
     }
 
-    pub(crate) fn positional_args(&mut self, num: u8) -> &mut Self {
+    pub fn positional_args(&mut self, num: u8) -> &mut Self {
         if num == 0 {
             return self;
         }
@@ -56,7 +56,7 @@ impl CmdBuilder {
         self
     }
 
-    pub(crate) fn build(self) -> Cmd {
+    pub fn build(self) -> Cmd {
         self.cmd
     }
 }
