@@ -18,6 +18,7 @@ pub struct HandlerError(pub String);
 
 pub type HandlerResult = Result<Action, HandlerError>;
 pub type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
+const RET_COMPLETION_TOKEN: &str = "RET";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandRegistrationError {
@@ -334,12 +335,10 @@ impl Repl {
                 doc: doc.map(str::to_string),
             })
             .collect::<Vec<_>>();
-        if completions.is_empty()
-            && req.partial.is_empty()
-            && let Some(doc) = mode.command_doc_at(state)?
-        {
+
+        if let Some(doc) = mode.command_doc_at(state)? {
             completions.push(CompletionItem {
-                token: String::new(),
+                token: RET_COMPLETION_TOKEN.to_string(),
                 doc: Some(doc.to_string()),
             });
         }
@@ -404,12 +403,11 @@ impl Repl {
             .unwrap_or(0);
 
         for item in items {
-            match (item.token.is_empty(), item.doc) {
-                (true, Some(doc)) => println!("  {}", doc),
-                (false, Some(doc)) => {
+            match item.doc {
+                Some(doc) => {
                     println!("  {:<width$}  {}", item.token, doc, width = width);
                 }
-                (_, None) => println!("  {}", item.token),
+                None => println!("  {}", item.token),
             }
         }
 
@@ -845,9 +843,73 @@ mod tests {
         assert_eq!(
             repl.run_once("show version ?").unwrap(),
             RunOnceOutcome::Completions(vec![CompletionItem {
-                token: String::new(),
+                token: RET_COMPLETION_TOKEN.to_string(),
                 doc: Some("show software version".to_string()),
             }])
+        );
+    }
+
+    #[test]
+    fn run_once_completion_on_accepting_state_with_literal_children_includes_ret_and_literals() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["foo"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["foo", "bar"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["foo", "baz"], 0), noop_handler())
+            .unwrap();
+        repl.set_edge_doc(0, "foo bar", "bar doc").unwrap();
+        repl.set_edge_doc(0, "foo baz", "baz doc").unwrap();
+        repl.set_command_doc(0, "foo", "foo doc").unwrap();
+
+        assert_eq!(
+            repl.run_once("foo ?").unwrap(),
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: RET_COMPLETION_TOKEN.to_string(),
+                    doc: Some("foo doc".to_string())
+                },
+                CompletionItem {
+                    token: "bar".to_string(),
+                    doc: Some("bar doc".to_string())
+                },
+                CompletionItem {
+                    token: "baz".to_string(),
+                    doc: Some("baz doc".to_string())
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn run_once_inline_partial_completion_includes_ret_when_state_accepts() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["foo"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["foo", "bar"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["foo", "baz"], 0), noop_handler())
+            .unwrap();
+        repl.set_edge_doc(0, "foo bar", "bar doc").unwrap();
+        repl.set_edge_doc(0, "foo baz", "baz doc").unwrap();
+        repl.set_command_doc(0, "foo", "foo doc").unwrap();
+
+        assert_eq!(
+            repl.run_once("foo b?").unwrap(),
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: RET_COMPLETION_TOKEN.to_string(),
+                    doc: Some("foo doc".to_string())
+                },
+                CompletionItem {
+                    token: "bar".to_string(),
+                    doc: Some("bar doc".to_string())
+                },
+                CompletionItem {
+                    token: "baz".to_string(),
+                    doc: Some("baz doc".to_string())
+                }
+            ])
         );
     }
 

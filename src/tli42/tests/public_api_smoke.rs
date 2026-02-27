@@ -90,3 +90,40 @@ fn public_repl_question_returns_doc_annotated_completion() {
         }])
     );
 }
+
+#[test]
+fn public_repl_question_includes_ret_for_accepting_prefix_with_doc() {
+    let mut repl = Repl::new();
+
+    let mut builder = CmdBuilder::new();
+    builder.literals(&["foo"]);
+    let foo_cmd = builder.build();
+    repl.register_mode_command(0, &foo_cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register foo");
+
+    let mut builder = CmdBuilder::new();
+    builder.literals(&["foo", "bar"]);
+    let bar_cmd = builder.build();
+    repl.register_mode_command(0, &bar_cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register foo bar");
+
+    repl.set_command_doc(0, "foo", "run foo")
+        .expect("set command doc");
+    repl.set_edge_doc(0, "foo bar", "run bar")
+        .expect("set edge doc");
+
+    let outcome = repl.run_once("foo ?").expect("run_once");
+    assert_eq!(
+        outcome,
+        RunOnceOutcome::Completions(vec![
+            CompletionItem {
+                token: "RET".to_string(),
+                doc: Some("run foo".to_string()),
+            },
+            CompletionItem {
+                token: "bar".to_string(),
+                doc: Some("run bar".to_string()),
+            },
+        ])
+    );
+}
