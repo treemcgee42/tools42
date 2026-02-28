@@ -2,7 +2,7 @@ mod core;
 
 use core::{Account, Core};
 use tli42::cmd::CmdBuilder;
-use tli42::repl::{Action, HandlerError, Repl, ReplError};
+use tli42::repl::{Action, CommandInputs, CompletionItem, HandlerError, Repl, ReplError};
 
 fn main() {
     let mut repl = build_repl_or_exit();
@@ -60,6 +60,22 @@ fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), Rep
 }
 
 fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
+    let mut create_account = CmdBuilder::new();
+    create_account
+        .literals(&["create", "account"])
+        .labeled_arg("name")
+        .labeled_arg("currency")
+        .labeled_arg("note");
+    let create_account_cmd = create_account.build();
+    repl.register_mode_command(
+        write_mode_id,
+        &create_account_cmd,
+        Box::new(|_, inputs| {
+            create_account_command(inputs)?;
+            Ok(Action::None)
+        }),
+    )?;
+
     let mut init = CmdBuilder::new();
     init.literals(&["init"]);
     let init_cmd = init.build();
@@ -95,6 +111,10 @@ fn register_docs(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
     repl.set_edge_doc(0, "write", "enter write mode")?;
     repl.set_command_doc(0, "write", "enter write mode commands")?;
 
+    repl.set_edge_doc(write_mode_id, "create", "create data in the tally database")?;
+    repl.set_edge_doc(write_mode_id, "create account", "create an account")?;
+    repl.set_edge_doc(write_mode_id, "create account name", "set the account name")?;
+
     repl.set_edge_doc(write_mode_id, "init", "initialize the tally database")?;
     repl.set_command_doc(write_mode_id, "init", "create the tally database and schema")?;
 
@@ -127,6 +147,28 @@ fn show_accounts_command() -> Result<(), HandlerError> {
     Ok(())
 }
 
+fn create_account_command(inputs: &CommandInputs) -> Result<(), HandlerError> {
+    let name = inputs
+        .labeled
+        .get("name")
+        .ok_or_else(|| HandlerError("missing required labeled input: name".to_string()))?;
+    let currency = inputs
+        .labeled
+        .get("currency")
+        .ok_or_else(|| HandlerError("missing required labeled input: currency".to_string()))?;
+    let note = inputs
+        .labeled
+        .get("note")
+        .ok_or_else(|| HandlerError("missing required labeled input: note".to_string()))?;
+
+    let core = Core::from_environment().map_err(|err| HandlerError(err.to_string()))?;
+    let account = core
+        .create_account(name, currency, note)
+        .map_err(|err| HandlerError(err.to_string()))?;
+    print!("{}", format_created_account(&account));
+    Ok(())
+}
+
 fn format_accounts(accounts: &[Account]) -> String {
     if accounts.is_empty() {
         return "accounts: (none)\n".to_string();
@@ -147,10 +189,14 @@ fn format_accounts(accounts: &[Account]) -> String {
     out
 }
 
+fn format_created_account(account: &Account) -> String {
+    format!("created account {} ({})\n", account.name, account.currency)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tli42::repl::{CompletionItem, RunOnceOutcome};
+    use tli42::repl::RunOnceOutcome;
 
     #[test]
     fn write_command_pushes_write_mode() {
@@ -170,6 +216,10 @@ mod tests {
         assert_eq!(
             outcome,
             RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: "create".to_string(),
+                    doc: Some("create data in the tally database".to_string()),
+                },
                 CompletionItem {
                     token: "delete-db".to_string(),
                     doc: Some("delete the tally database file".to_string()),
@@ -217,11 +267,74 @@ mod tests {
     }
 
     #[test]
+    fn create_question_lists_account_subcommand() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl.run_once("create ?").expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "account".to_string(),
+                doc: Some("create an account".to_string()),
+            }])
+        );
+    }
+
+    #[test]
+    fn create_account_question_lists_name_label() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl
+            .run_once("create account ?")
+            .expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "name".to_string(),
+                doc: Some("set the account name".to_string()),
+            }])
+        );
+    }
+
+    #[test]
+    fn create_account_after_name_and_currency_lists_note() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl
+            .run_once("create account name cash currency USD ?")
+            .expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "note".to_string(),
+                doc: None,
+            }])
+        );
+    }
+
+    #[test]
     fn show_accounts_command_is_registered() {
         let mut repl = build_repl().expect("repl should build");
 
         let outcome = repl
             .run_once("show accounts")
+            .expect("run_once should succeed");
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::ActionApplied(Action::None) | RunOnceOutcome::HandlerError(_)
+        ));
+    }
+
+    #[test]
+    fn create_account_command_is_registered() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl
+            .run_once("create account name cash currency USD note wallet")
             .expect("run_once should succeed");
         assert!(matches!(
             outcome,
@@ -264,5 +377,20 @@ mod tests {
             output,
             "accounts:\n  checking        USD  open\n  longer-savings  EUR  closed\n"
         );
+    }
+
+    #[test]
+    fn format_created_account_renders_compact_summary() {
+        let account = Account {
+            id: uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+            parent_id: None,
+            name: "cash".to_string(),
+            currency: "USD".to_string(),
+            is_closed: false,
+            created_at: "2026-02-28 00:00:00".to_string(),
+            note: Some("wallet".to_string()),
+        };
+
+        assert_eq!(format_created_account(&account), "created account cash (USD)\n");
     }
 }

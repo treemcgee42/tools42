@@ -1,8 +1,10 @@
+use super::account::AccountWriteError;
 use super::db::Db;
 use super::{Account, AccountListError};
 use super::user_data::{UserDataError, UserDataManager};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 pub struct Core {
     _user_data: UserDataManager,
@@ -13,6 +15,7 @@ pub struct Core {
 pub enum CoreError {
     UserData(UserDataError),
     AccountList(AccountListError),
+    AccountWrite(AccountWriteError),
 }
 
 impl Display for CoreError {
@@ -20,6 +23,7 @@ impl Display for CoreError {
         match self {
             Self::UserData(err) => write!(f, "failed to initialize core: {err}"),
             Self::AccountList(err) => write!(f, "failed to list accounts: {err}"),
+            Self::AccountWrite(err) => write!(f, "failed to create account: {err}"),
         }
     }
 }
@@ -29,6 +33,7 @@ impl std::error::Error for CoreError {
         match self {
             Self::UserData(err) => Some(err),
             Self::AccountList(err) => Some(err),
+            Self::AccountWrite(err) => Some(err),
         }
     }
 }
@@ -42,6 +47,12 @@ impl From<UserDataError> for CoreError {
 impl From<AccountListError> for CoreError {
     fn from(value: AccountListError) -> Self {
         Self::AccountList(value)
+    }
+}
+
+impl From<AccountWriteError> for CoreError {
+    fn from(value: AccountWriteError) -> Self {
+        Self::AccountWrite(value)
     }
 }
 
@@ -66,6 +77,17 @@ impl Core {
 
     pub fn list_accounts(&self) -> Result<Vec<Account>, CoreError> {
         self._db.list_accounts().map_err(CoreError::from)
+    }
+
+    pub fn create_account(
+        &self,
+        name: &str,
+        currency: &str,
+        note: &str,
+    ) -> Result<Account, CoreError> {
+        self._db
+            .create_account(Uuid::new_v4(), None, name, currency, Some(note))
+            .map_err(CoreError::from)
     }
 
     pub fn delete_db_from_environment() -> Result<(PathBuf, bool), CoreError> {
@@ -121,5 +143,25 @@ mod tests {
         assert_eq!(accounts[0].name, "checking");
         assert_eq!(accounts[0].currency, "USD");
         assert!(!accounts[0].is_closed);
+    }
+
+    #[test]
+    fn create_account_delegates_to_db() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let core = Core::from_data_dir(&data_dir).expect("open core");
+
+        let created = core
+            .create_account("cash", "USD", "wallet")
+            .expect("create account");
+
+        assert_eq!(created.parent_id, None);
+        assert_eq!(created.name, "cash");
+        assert_eq!(created.currency, "USD");
+        assert_eq!(created.note.as_deref(), Some("wallet"));
+        assert!(!created.is_closed);
+
+        let accounts = core.list_accounts().expect("list accounts");
+        assert_eq!(accounts, vec![created]);
     }
 }
