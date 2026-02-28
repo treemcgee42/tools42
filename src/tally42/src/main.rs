@@ -1,8 +1,8 @@
 mod core;
 
-use core::Core;
+use core::{Account, Core};
 use tli42::cmd::CmdBuilder;
-use tli42::repl::{Action, Repl, ReplError};
+use tli42::repl::{Action, HandlerError, Repl, ReplError};
 
 fn main() {
     let mut repl = build_repl_or_exit();
@@ -44,6 +44,18 @@ fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), Rep
         Box::new(move |_, _| Ok(Action::PushMode(write_mode_id))),
     )?;
 
+    let mut show_accounts = CmdBuilder::new();
+    show_accounts.literals(&["show", "accounts"]);
+    let show_accounts_cmd = show_accounts.build();
+    repl.register_mode_command(
+        0,
+        &show_accounts_cmd,
+        Box::new(|_, _| {
+            show_accounts_command()?;
+            Ok(Action::None)
+        }),
+    )?;
+
     Ok(())
 }
 
@@ -55,7 +67,7 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
         write_mode_id,
         &init_cmd,
         Box::new(|_, _| {
-            init_command_or_exit();
+            init_command()?;
             Ok(Action::None)
         }),
     )?;
@@ -67,7 +79,7 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
         write_mode_id,
         &delete_db_cmd,
         Box::new(|_, _| {
-            delete_db_or_exit();
+            delete_db_command()?;
             Ok(Action::None)
         }),
     )?;
@@ -76,6 +88,10 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
 }
 
 fn register_docs(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
+    repl.set_edge_doc(0, "show", "display read-only information")?;
+    repl.set_edge_doc(0, "show accounts", "list accounts")?;
+    repl.set_command_doc(0, "show accounts", "list all accounts in the database")?;
+
     repl.set_edge_doc(0, "write", "enter write mode")?;
     repl.set_command_doc(0, "write", "enter write mode commands")?;
 
@@ -88,27 +104,47 @@ fn register_docs(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
     Ok(())
 }
 
-fn init_command_or_exit() {
-    let core = Core::from_environment().unwrap_or_else(|err| {
-        eprintln!("error: failed to initialize core: {err}");
-        std::process::exit(1);
-    });
-    core.init().unwrap_or_else(|err| {
-        eprintln!("error: failed to initialize core: {err}");
-        std::process::exit(1);
-    });
+fn init_command() -> Result<(), HandlerError> {
+    let core = Core::from_environment().map_err(|err| HandlerError(err.to_string()))?;
+    core.init()
+        .map_err(|err| HandlerError(err.to_string()))?;
     println!("initialized database at {}", core.db_path().display());
+    Ok(())
 }
 
-fn delete_db_or_exit() {
-    match Core::delete_db_from_environment() {
-        Ok((path, true)) => println!("deleted database at {}", path.display()),
-        Ok((path, false)) => println!("database not found at {}", path.display()),
-        Err(err) => {
-            eprintln!("error: failed to delete database: {err}");
-            std::process::exit(1);
-        }
+fn delete_db_command() -> Result<(), HandlerError> {
+    match Core::delete_db_from_environment().map_err(|err| HandlerError(err.to_string()))? {
+        (path, true) => println!("deleted database at {}", path.display()),
+        (path, false) => println!("database not found at {}", path.display()),
+    };
+    Ok(())
+}
+
+fn show_accounts_command() -> Result<(), HandlerError> {
+    let core = Core::from_environment().map_err(|err| HandlerError(err.to_string()))?;
+    let accounts = core.list_accounts().map_err(|err| HandlerError(err.to_string()))?;
+    print!("{}", format_accounts(&accounts));
+    Ok(())
+}
+
+fn format_accounts(accounts: &[Account]) -> String {
+    if accounts.is_empty() {
+        return "accounts: (none)\n".to_string();
     }
+
+    let width = accounts.iter().map(|account| account.name.len()).max().unwrap_or(0);
+    let mut out = String::from("accounts:\n");
+    for account in accounts {
+        let status = if account.is_closed { "closed" } else { "open" };
+        out.push_str(&format!(
+            "  {:<width$}  {}  {}\n",
+            account.name,
+            account.currency,
+            status,
+            width = width
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -143,6 +179,90 @@ mod tests {
                     doc: Some("initialize the tally database".to_string()),
                 },
             ])
+        );
+    }
+
+    #[test]
+    fn question_shows_annotated_root_completions() {
+        let mut repl = build_repl().expect("repl should build");
+
+        let outcome = repl.run_once("?").expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: "show".to_string(),
+                    doc: Some("display read-only information".to_string()),
+                },
+                CompletionItem {
+                    token: "write".to_string(),
+                    doc: Some("enter write mode".to_string()),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn show_question_lists_accounts_subcommand() {
+        let mut repl = build_repl().expect("repl should build");
+
+        let outcome = repl.run_once("show ?").expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "accounts".to_string(),
+                doc: Some("list accounts".to_string()),
+            }])
+        );
+    }
+
+    #[test]
+    fn show_accounts_command_is_registered() {
+        let mut repl = build_repl().expect("repl should build");
+
+        let outcome = repl
+            .run_once("show accounts")
+            .expect("run_once should succeed");
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::ActionApplied(Action::None) | RunOnceOutcome::HandlerError(_)
+        ));
+    }
+
+    #[test]
+    fn format_accounts_renders_empty_state() {
+        assert_eq!(format_accounts(&[]), "accounts: (none)\n");
+    }
+
+    #[test]
+    fn format_accounts_renders_compact_table() {
+        let open_id = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let closed_id = uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+
+        let output = format_accounts(&[
+            Account {
+                id: open_id,
+                parent_id: None,
+                name: "checking".to_string(),
+                currency: "USD".to_string(),
+                is_closed: false,
+                created_at: "2026-02-28 00:00:00".to_string(),
+                note: None,
+            },
+            Account {
+                id: closed_id,
+                parent_id: None,
+                name: "longer-savings".to_string(),
+                currency: "EUR".to_string(),
+                is_closed: true,
+                created_at: "2026-02-28 00:00:00".to_string(),
+                note: Some("archived".to_string()),
+            },
+        ]);
+
+        assert_eq!(
+            output,
+            "accounts:\n  checking        USD  open\n  longer-savings  EUR  closed\n"
         );
     }
 }

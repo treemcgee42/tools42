@@ -1,4 +1,5 @@
 use super::db::Db;
+use super::{Account, AccountListError};
 use super::user_data::{UserDataError, UserDataManager};
 use std::fmt::{Display, Formatter};
 use std::path::{Path, PathBuf};
@@ -11,12 +12,14 @@ pub struct Core {
 #[derive(Debug)]
 pub enum CoreError {
     UserData(UserDataError),
+    AccountList(AccountListError),
 }
 
 impl Display for CoreError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UserData(err) => write!(f, "failed to initialize core: {err}"),
+            Self::AccountList(err) => write!(f, "failed to list accounts: {err}"),
         }
     }
 }
@@ -25,6 +28,7 @@ impl std::error::Error for CoreError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::UserData(err) => Some(err),
+            Self::AccountList(err) => Some(err),
         }
     }
 }
@@ -32,6 +36,12 @@ impl std::error::Error for CoreError {
 impl From<UserDataError> for CoreError {
     fn from(value: UserDataError) -> Self {
         Self::UserData(value)
+    }
+}
+
+impl From<AccountListError> for CoreError {
+    fn from(value: AccountListError) -> Self {
+        Self::AccountList(value)
     }
 }
 
@@ -52,6 +62,10 @@ impl Core {
 
     pub fn db_path(&self) -> &Path {
         self._user_data.db_path()
+    }
+
+    pub fn list_accounts(&self) -> Result<Vec<Account>, CoreError> {
+        self._db.list_accounts().map_err(CoreError::from)
     }
 
     pub fn delete_db_from_environment() -> Result<(PathBuf, bool), CoreError> {
@@ -81,5 +95,31 @@ impl Core {
             _user_data: user_data,
             _db: db,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use uuid::Uuid;
+
+    #[test]
+    fn list_accounts_delegates_to_db() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let core = Core::from_data_dir(&data_dir).expect("open core");
+
+        let account_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").unwrap();
+        core._db
+            .create_account(account_id, None, "checking", "USD", None)
+            .expect("create account");
+
+        let accounts = core.list_accounts().expect("list accounts");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, account_id);
+        assert_eq!(accounts[0].name, "checking");
+        assert_eq!(accounts[0].currency, "USD");
+        assert!(!accounts[0].is_closed);
     }
 }

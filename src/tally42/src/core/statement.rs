@@ -1,4 +1,4 @@
-use super::db::{Db, DbError};
+use super::db::Db;
 use super::user_data::UserDataError;
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
@@ -255,7 +255,6 @@ pub enum AddStatementError {
     FileTooLarge(u64),
     DuplicateFileHash { hash: String, path: PathBuf },
     RenameToFinal(std::io::Error),
-    OpenDb(DbError),
     PrepareUserData(UserDataError),
     InsertStatement(StatementWriteError),
     InsertStatementCleanupFailed {
@@ -284,7 +283,6 @@ impl Display for AddStatementError {
                 path.display()
             ),
             Self::RenameToFinal(err) => write!(f, "failed to finalize managed statement file: {err}"),
-            Self::OpenDb(err) => write!(f, "failed to open database for statement ingest: {err}"),
             Self::PrepareUserData(err) => {
                 write!(f, "failed to prepare user data for statement ingest: {err}")
             }
@@ -313,7 +311,6 @@ impl std::error::Error for AddStatementError {
             Self::FileTooLarge(_) => None,
             Self::DuplicateFileHash { .. } => None,
             Self::RenameToFinal(err) => Some(err),
-            Self::OpenDb(err) => Some(err),
             Self::PrepareUserData(err) => Some(err),
             Self::InsertStatement(err) => Some(err),
             Self::InsertStatementCleanupFailed {
