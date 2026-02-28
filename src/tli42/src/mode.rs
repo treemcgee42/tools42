@@ -122,7 +122,21 @@ impl Mode {
                     }
                     current_state = next_state;
                 }
-                cmd::TraversalAtom::Var | cmd::TraversalAtom::LabeledVar => {
+                cmd::TraversalAtom::Var { name, doc } => {
+                    if let Some(doc) = doc {
+                        let completion = format!("<{}>", name.as_deref().unwrap_or("arg"));
+                        let _ = self.sm.set_var_edge_doc(current_state, completion, doc)?;
+                    }
+                    current_state = self
+                        .sm
+                        .var_edge_state(current_state)?
+                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
+                }
+                cmd::TraversalAtom::LabeledVar { label, doc } => {
+                    if let Some(doc) = doc {
+                        let completion = format!("<{}>", label);
+                        let _ = self.sm.set_var_edge_doc(current_state, completion, doc)?;
+                    }
                     current_state = self
                         .sm
                         .var_edge_state(current_state)?

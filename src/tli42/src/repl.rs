@@ -1166,9 +1166,23 @@ mod tests {
             }])
         );
         assert_eq!(
+            repl.run_once("create account name ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "<name>".to_string(),
+                doc: Some("account name".to_string())
+            }])
+        );
+        assert_eq!(
             repl.run_once("create account name cash ?").unwrap(),
             RunOnceOutcome::Completions(vec![CompletionItem {
                 token: "currency".to_string(),
+                doc: Some("account currency".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("create account name cash currency ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "<currency>".to_string(),
                 doc: Some("account currency".to_string())
             }])
         );
@@ -1177,6 +1191,14 @@ mod tests {
                 .unwrap(),
             RunOnceOutcome::Completions(vec![CompletionItem {
                 token: "note".to_string(),
+                doc: Some("account note".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("create account name cash currency USD note ?")
+                .unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "<note>".to_string(),
                 doc: Some("account note".to_string())
             }])
         );

@@ -192,4 +192,15 @@ fn public_repl_builder_docs_work_after_labeled_values() {
             doc: Some("account currency".to_string()),
         }])
     );
+
+    let outcome = repl
+        .run_once("create account name ?")
+        .expect("run_once");
+    assert_eq!(
+        outcome,
+        RunOnceOutcome::Completions(vec![CompletionItem {
+            token: "<name>".to_string(),
+            doc: Some("account name".to_string()),
+        }])
+    );
 }

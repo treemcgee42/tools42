@@ -12,6 +12,7 @@ struct EdgeLink {
     edge: Edge,
     next_state: StateId,
     doc: Option<String>,
+    var_completion: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,7 @@ struct StateScan<'a> {
     prefix_literal_doc: Option<&'a str>,
     var_match: Option<StateId>,
     var_match_count: usize,
+    var_completion: Option<(&'a str, Option<&'a str>)>,
     completions: Vec<(&'a str, Option<&'a str>)>,
 }
 
@@ -121,8 +123,13 @@ impl Sm {
                     scan.var_match_count += 1;
                     if scan.var_match_count == 1 {
                         scan.var_match = Some(link.next_state);
+                        scan.var_completion = link
+                            .var_completion
+                            .as_deref()
+                            .map(|token| (token, link.doc.as_deref()));
                     } else {
                         scan.var_match = None;
+                        scan.var_completion = None;
                     }
                 }
             }
@@ -153,7 +160,14 @@ impl Sm {
         partial_token: &str,
     ) -> Vec<(&'a str, Option<&'a str>)> {
         self.scan_state(current_state, partial_token, true)
-            .map(|scan| scan.completions)
+            .map(|mut scan| {
+                if partial_token.is_empty() {
+                    if let Some(var_completion) = scan.var_completion {
+                        scan.completions.push(var_completion);
+                    }
+                }
+                scan.completions
+            })
             .unwrap_or_default()
     }
 
@@ -239,6 +253,7 @@ impl Sm {
             edge: Edge::Literal(literal.to_string()),
             next_state: new_state,
             doc: None,
+            var_completion: None,
         });
         Ok(new_state)
     }
@@ -278,6 +293,7 @@ impl Sm {
             edge: Edge::Var,
             next_state: new_state,
             doc: None,
+            var_completion: None,
         });
         Ok(new_state)
     }
@@ -415,6 +431,40 @@ impl Sm {
         Ok(true)
     }
 
+    pub(crate) fn set_var_edge_doc(
+        &mut self,
+        current_state: StateId,
+        completion: String,
+        doc: String,
+    ) -> Result<bool, CmdInsertError> {
+        let state = self
+            .states
+            .get_mut(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut match_idx: Option<usize> = None;
+        let mut var_count = 0usize;
+        for (idx, link) in state.edges.iter().enumerate() {
+            if matches!(link.edge, Edge::Var) {
+                var_count += 1;
+                if var_count == 1 {
+                    match_idx = Some(idx);
+                }
+            }
+        }
+
+        if var_count > 1 {
+            return Err(CmdInsertError::MultipleVarEdges(current_state));
+        }
+
+        if let Some(idx) = match_idx {
+            state.edges[idx].var_completion = Some(completion);
+            state.edges[idx].doc = Some(doc);
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     pub(crate) fn command_doc_at(&self, state_id: StateId) -> Result<Option<&str>, CmdInsertError> {
         let state = self
             .states
@@ -422,6 +472,7 @@ impl Sm {
             .ok_or(CmdInsertError::InvalidState(state_id))?;
         Ok(state.accept.as_ref().and_then(|a| a.doc.as_deref()))
     }
+
 }
 
 #[cfg(test)]
@@ -433,6 +484,7 @@ mod tests {
             edge: Edge::Literal(s.to_string()),
             next_state,
             doc: None,
+            var_completion: None,
         }
     }
 
@@ -441,6 +493,7 @@ mod tests {
             edge: Edge::Var,
             next_state,
             doc: None,
+            var_completion: None,
         }
     }
 
@@ -462,6 +515,25 @@ mod tests {
 
         let completions = sorted_strings(sm.get_completions(0, "sh"));
         assert_eq!(completions, vec!["shell", "show"]);
+    }
+
+    #[test]
+    fn get_completions_with_docs_includes_var_placeholder_when_available() {
+        let sm = sm_with_states(vec![State {
+            edges: vec![EdgeLink {
+                edge: Edge::Var,
+                next_state: 1,
+                doc: Some("account name".to_string()),
+                var_completion: Some("<name>".to_string()),
+            }],
+            accept: None,
+        }]);
+
+        assert_eq!(
+            sm.get_completions_with_docs(0, ""),
+            vec![("<name>", Some("account name"))]
+        );
+        assert!(sm.get_completions_with_docs(0, "na").is_empty());
     }
 
     #[test]

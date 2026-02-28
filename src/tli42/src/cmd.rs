@@ -161,8 +161,14 @@ pub(crate) enum TraversalAtom {
         token: String,
         doc: Option<String>,
     },
-    Var,
-    LabeledVar,
+    Var {
+        name: Option<String>,
+        doc: Option<String>,
+    },
+    LabeledVar {
+        label: String,
+        doc: Option<String>,
+    },
 }
 
 impl Cmd {
@@ -211,8 +217,14 @@ impl Cmd {
                                 token: token.clone(),
                                 doc: doc.clone(),
                             }),
-                            Atom::Var { .. } => atoms.push(TraversalAtom::Var),
-                            Atom::LabeledVar { .. } => atoms.push(TraversalAtom::LabeledVar),
+                            Atom::Var { name, doc } => atoms.push(TraversalAtom::Var {
+                                name: name.clone(),
+                                doc: doc.clone(),
+                            }),
+                            Atom::LabeledVar { label, doc } => atoms.push(TraversalAtom::LabeledVar {
+                                label: label.clone(),
+                                doc: doc.clone(),
+                            }),
                         }
                     }
                 }

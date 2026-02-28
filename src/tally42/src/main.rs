@@ -286,6 +286,23 @@ mod tests {
     }
 
     #[test]
+    fn create_account_name_question_lists_name_placeholder() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl
+            .run_once("create account name ?")
+            .expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "<name>".to_string(),
+                doc: Some("set the account name".to_string()),
+            }])
+        );
+    }
+
+    #[test]
     fn create_account_after_name_and_currency_lists_note() {
         let mut repl = build_repl().expect("repl should build");
         repl.run_once("write").expect("enter write mode");
@@ -298,6 +315,23 @@ mod tests {
             RunOnceOutcome::Completions(vec![CompletionItem {
                 token: "note".to_string(),
                 doc: Some("set the account note".to_string()),
+            }])
+        );
+    }
+
+    #[test]
+    fn create_account_currency_question_lists_currency_placeholder() {
+        let mut repl = build_repl().expect("repl should build");
+        repl.run_once("write").expect("enter write mode");
+
+        let outcome = repl
+            .run_once("create account name cash currency ?")
+            .expect("completion should succeed");
+        assert_eq!(
+            outcome,
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "<currency>".to_string(),
+                doc: Some("set the account currency".to_string()),
             }])
         );
     }
