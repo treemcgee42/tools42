@@ -4,6 +4,7 @@ pub(crate) type ModeId = u32;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Mode {
+    #[cfg_attr(not(test), allow(dead_code))]
     id: ModeId,
     name: String,
     sm: sm::Sm,
@@ -18,6 +19,7 @@ impl Mode {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn id(&self) -> ModeId {
         self.id
     }
@@ -38,6 +40,7 @@ impl Mode {
         self.sm.insert_cmd(cmd, command_id)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn next_state(
         &self,
         current_state: sm::StateId,

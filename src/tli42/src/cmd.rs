@@ -24,6 +24,12 @@ pub struct CmdBuilder {
     cmd: Cmd,
 }
 
+impl Default for CmdBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CmdBuilder {
     pub fn new() -> Self {
         Self {

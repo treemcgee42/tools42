@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 use std::collections::{HashMap, hash_map};
 
 type InternedStringType = u32;
@@ -76,7 +78,7 @@ impl<'a> Iterator for Completions<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let iter = self.iter.as_mut()?;
-        while let Some((edge, child_idx)) = iter.next() {
+        for (edge, child_idx) in iter.by_ref() {
             let token = self.interner.resolve(*edge)?;
             if token.starts_with(self.partial) {
                 return Some((token, self.nodes[*child_idx].value));
@@ -153,9 +155,7 @@ impl Trie {
                 Some(node_idx) => self.nodes[node_idx].children.get(&edge).copied(),
             };
 
-            if current_idx.is_none() {
-                return None;
-            }
+            current_idx?;
         }
 
         match current_idx {

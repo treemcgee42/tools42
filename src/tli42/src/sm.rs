@@ -192,6 +192,7 @@ impl Sm {
     }
 
     /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
         self.step(current_state, input_token)
             .map(|step| step.next_state)
@@ -212,12 +213,12 @@ impl Sm {
         let mut existing: Option<StateId> = None;
         let mut literal_count = 0usize;
         for link in &state.edges {
-            if let Edge::Literal(existing_literal) = &link.edge {
-                if existing_literal == literal {
-                    literal_count += 1;
-                    if literal_count == 1 {
-                        existing = Some(link.next_state);
-                    }
+            if let Edge::Literal(existing_literal) = &link.edge
+                && existing_literal == literal
+            {
+                literal_count += 1;
+                if literal_count == 1 {
+                    existing = Some(link.next_state);
                 }
             }
         }
@@ -326,16 +327,16 @@ impl Sm {
 
         let mut match_idx: Option<usize> = None;
         for (idx, link) in state.edges.iter().enumerate() {
-            if let Edge::Literal(existing_literal) = &link.edge {
-                if existing_literal == literal {
-                    if match_idx.is_some() {
-                        return Err(CmdInsertError::DuplicateLiteralEdges {
-                            state: current_state,
-                            literal: literal.to_string(),
-                        });
-                    }
-                    match_idx = Some(idx);
+            if let Edge::Literal(existing_literal) = &link.edge
+                && existing_literal == literal
+            {
+                if match_idx.is_some() {
+                    return Err(CmdInsertError::DuplicateLiteralEdges {
+                        state: current_state,
+                        literal: literal.to_string(),
+                    });
                 }
+                match_idx = Some(idx);
             }
         }
 

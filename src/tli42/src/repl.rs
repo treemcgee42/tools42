@@ -278,6 +278,7 @@ impl Repl {
         self.get_mode(id)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn current_mode_mut(&mut self) -> Result<&mut mode::Mode, ReplError> {
         let id = self.current_mode_id()?;
         self.get_mode_mut(id)
@@ -493,6 +494,7 @@ impl Repl {
         self.completion_snapshot().complete_request(req)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
         self.completion_snapshot().complete_prefix(prefix)
     }
@@ -674,6 +676,12 @@ impl Repl {
     #[cfg(test)]
     fn handlers_len(&self) -> usize {
         self.handlers.len()
+    }
+}
+
+impl Default for Repl {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
