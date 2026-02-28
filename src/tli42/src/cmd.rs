@@ -1,9 +1,22 @@
 use crate::sm;
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CaptureKind {
+    Positional,
+    Labeled(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CmdSchemaError {
+    DuplicateLabeledArg { label: String },
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Atom {
     Literal(String),
     Var,
+    LabeledVar(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,8 +73,46 @@ impl CmdBuilder {
         self
     }
 
+    pub fn labeled_arg(&mut self, label: &str) -> &mut Self {
+        self.cmd.exprs.push(Expr::Sequence(vec![
+            Atom::Literal(label.to_string()),
+            Atom::LabeledVar(label.to_string()),
+        ]));
+        self
+    }
+
     pub fn build(self) -> Cmd {
         self.cmd
+    }
+}
+
+impl Cmd {
+    pub(crate) fn capture_spec(&self) -> Result<Vec<CaptureKind>, CmdSchemaError> {
+        let mut capture_spec = Vec::new();
+        let mut seen_labeled = BTreeSet::new();
+
+        for expr in &self.exprs {
+            match expr {
+                Expr::Sequence(atoms) => {
+                    for atom in atoms {
+                        match atom {
+                            Atom::Literal(_) => {}
+                            Atom::Var => capture_spec.push(CaptureKind::Positional),
+                            Atom::LabeledVar(label) => {
+                                if !seen_labeled.insert(label.clone()) {
+                                    return Err(CmdSchemaError::DuplicateLabeledArg {
+                                        label: label.clone(),
+                                    });
+                                }
+                                capture_spec.push(CaptureKind::Labeled(label.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(capture_spec)
     }
 }
 
@@ -73,7 +124,7 @@ impl sm::Sm {
     ) -> Result<sm::StateId, sm::CmdInsertError> {
         match atom {
             Atom::Literal(literal) => self.ensure_literal_edge(current_state, literal),
-            Atom::Var => self.ensure_var_edge(current_state),
+            Atom::Var | Atom::LabeledVar(_) => self.ensure_var_edge(current_state),
         }
     }
 
@@ -125,6 +176,69 @@ mod tests {
                 ]),
                 Expr::Sequence(vec![Atom::Var, Atom::Var]),
             ]
+        );
+    }
+
+    #[test]
+    fn builder_constructs_labeled_arg_sequences() {
+        let mut builder = CmdBuilder::new();
+        builder
+            .literals(&["create", "account"])
+            .labeled_arg("name")
+            .labeled_arg("currency");
+        let cmd = builder.build();
+
+        assert_eq!(
+            cmd.exprs,
+            vec![
+                Expr::Sequence(vec![
+                    Atom::Literal("create".to_string()),
+                    Atom::Literal("account".to_string())
+                ]),
+                Expr::Sequence(vec![
+                    Atom::Literal("name".to_string()),
+                    Atom::LabeledVar("name".to_string())
+                ]),
+                Expr::Sequence(vec![
+                    Atom::Literal("currency".to_string()),
+                    Atom::LabeledVar("currency".to_string())
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_spec_returns_positional_and_labeled_kinds() {
+        let mut builder = CmdBuilder::new();
+        builder
+            .literals(&["set"])
+            .positional_args(1)
+            .labeled_arg("value");
+        let cmd = builder.build();
+
+        assert_eq!(
+            cmd.capture_spec().unwrap(),
+            vec![
+                CaptureKind::Positional,
+                CaptureKind::Labeled("value".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn capture_spec_rejects_duplicate_labeled_args() {
+        let mut builder = CmdBuilder::new();
+        builder
+            .literals(&["create", "account"])
+            .labeled_arg("name")
+            .labeled_arg("name");
+        let cmd = builder.build();
+
+        assert_eq!(
+            cmd.capture_spec().unwrap_err(),
+            CmdSchemaError::DuplicateLabeledArg {
+                label: "name".to_string()
+            }
         );
     }
 
@@ -209,5 +323,28 @@ mod tests {
 
         assert_eq!(sm.accept_at(var_state).unwrap(), Some(1));
         assert_eq!(sm.accept_at(ver_state).unwrap(), Some(2));
+    }
+
+    #[test]
+    fn insert_cmd_supports_labeled_args() {
+        let mut sm = sm::Sm::new();
+
+        let mut builder = CmdBuilder::new();
+        builder
+            .literals(&["create", "account"])
+            .labeled_arg("name")
+            .labeled_arg("currency");
+        let cmd = builder.build();
+
+        sm.insert_cmd(&cmd, 7).unwrap();
+
+        let create = sm.next_state(0, "create").unwrap();
+        let account = sm.next_state(create, "account").unwrap();
+        let name = sm.next_state(account, "name").unwrap();
+        let value = sm.next_state(name, "cash").unwrap();
+        let currency = sm.next_state(value, "currency").unwrap();
+        let usd = sm.next_state(currency, "USD").unwrap();
+
+        assert_eq!(sm.accept_at(usd).unwrap(), Some(7));
     }
 }

@@ -11,7 +11,11 @@ fn main() -> std::io::Result<()> {
         0,
         &hello_cmd,
         Box::new(|_, inputs| {
-            let name = inputs.first().map(String::as_str).unwrap_or("world");
+            let name = inputs
+                .positionals
+                .first()
+                .map(String::as_str)
+                .unwrap_or("world");
             println!("hello, {}", name);
             Ok(Action::None)
         }),

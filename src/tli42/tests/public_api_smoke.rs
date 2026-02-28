@@ -1,8 +1,9 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use tli42::cmd::CmdBuilder;
-use tli42::repl::{Action, CompletionItem, Repl, RunOnceOutcome};
+use tli42::repl::{Action, CommandInputs, CompletionItem, Repl, RunOnceOutcome};
 
 #[test]
 fn public_repl_register_and_run_once_captures_vars() {
@@ -18,7 +19,7 @@ fn public_repl_register_and_run_once_captures_vars() {
         0,
         &cmd,
         Box::new(move |_, inputs| {
-            *seen_clone.borrow_mut() = inputs.to_vec();
+            *seen_clone.borrow_mut() = inputs.positionals.clone();
             Ok(Action::None)
         }),
     )
@@ -29,6 +30,45 @@ fn public_repl_register_and_run_once_captures_vars() {
     assert_eq!(
         &*seen.borrow(),
         &vec!["eth0".to_string(), "brief".to_string()]
+    );
+}
+
+#[test]
+fn public_repl_register_and_run_once_captures_labeled_args() {
+    let mut repl = Repl::new();
+    let seen: Rc<RefCell<Option<CommandInputs>>> = Rc::new(RefCell::new(None));
+    let seen_clone = Rc::clone(&seen);
+
+    let mut builder = CmdBuilder::new();
+    builder
+        .literals(&["create", "account"])
+        .labeled_arg("name")
+        .labeled_arg("currency");
+    let cmd = builder.build();
+
+    repl.register_mode_command(
+        0,
+        &cmd,
+        Box::new(move |_, inputs| {
+            *seen_clone.borrow_mut() = Some(inputs.clone());
+            Ok(Action::None)
+        }),
+    )
+    .expect("register command");
+
+    let outcome = repl
+        .run_once("create account name \"cash account\" currency USD")
+        .expect("run_once");
+    assert_eq!(outcome, RunOnceOutcome::ActionApplied(Action::None));
+    assert_eq!(
+        *seen.borrow(),
+        Some(CommandInputs {
+            positionals: vec![],
+            labeled: BTreeMap::from([
+                ("currency".to_string(), "USD".to_string()),
+                ("name".to_string(), "cash account".to_string()),
+            ]),
+        })
     );
 }
 

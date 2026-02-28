@@ -1,10 +1,10 @@
 use crate::{cmd, editor, mode, sm};
-use std::io;
 use std::fmt;
+use std::collections::BTreeMap;
+use std::io;
 
 pub type ModeId = u32;
 pub type CommandId = u32;
-pub type ParsedInputs = Vec<String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
@@ -17,8 +17,14 @@ pub enum Action {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerError(pub String);
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInputs {
+    pub positionals: Vec<String>,
+    pub labeled: BTreeMap<String, String>,
+}
+
 pub type HandlerResult = Result<Action, HandlerError>;
-pub type Handler = Box<dyn FnMut(&mut Repl, &[String]) -> HandlerResult>;
+pub type Handler = Box<dyn FnMut(&mut Repl, &CommandInputs) -> HandlerResult>;
 const RET_COMPLETION_TOKEN: &str = "RET";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +38,9 @@ pub enum CommandRegistrationError {
     DuplicateCommandPath {
         existing: CommandId,
         attempted: CommandId,
+    },
+    DuplicateLabeledArg {
+        label: String,
     },
 }
 
@@ -75,10 +84,22 @@ impl From<sm::CmdInsertError> for ReplError {
     }
 }
 
+impl From<cmd::CmdSchemaError> for ReplError {
+    fn from(value: cmd::CmdSchemaError) -> Self {
+        let mapped = match value {
+            cmd::CmdSchemaError::DuplicateLabeledArg { label } => {
+                CommandRegistrationError::DuplicateLabeledArg { label }
+            }
+        };
+        Self::CmdInsert(mapped)
+    }
+}
+
 pub struct Repl {
     modes: Vec<mode::Mode>,
     stack: Vec<ModeId>,
     handlers: Vec<Handler>,
+    capture_specs: Vec<Vec<cmd::CaptureKind>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +396,7 @@ impl Repl {
             modes: vec![mode::Mode::new(0, "global")],
             stack: vec![0],
             handlers: Vec::new(),
+            capture_specs: Vec::new(),
         }
     }
 
@@ -429,9 +451,14 @@ impl Repl {
         Ok(self.stack.pop().expect("stack length checked above"))
     }
 
-    pub fn register_handler(&mut self, handler: Handler) -> CommandId {
+    fn register_handler(
+        &mut self,
+        handler: Handler,
+        capture_spec: Vec<cmd::CaptureKind>,
+    ) -> CommandId {
         let id = self.handlers.len() as CommandId;
         self.handlers.push(handler);
+        self.capture_specs.push(capture_spec);
         id
     }
 
@@ -441,6 +468,7 @@ impl Repl {
         cmd: &cmd::Cmd,
         command_id: CommandId,
     ) -> Result<(), ReplError> {
+        cmd.capture_spec()?;
         let mode = self.get_mode_mut(mode_id)?;
         mode.insert_cmd(cmd, command_id)?;
         Ok(())
@@ -452,9 +480,11 @@ impl Repl {
         cmd: &cmd::Cmd,
         handler: Handler,
     ) -> Result<CommandId, ReplError> {
-        let command_id = self.register_handler(handler);
+        let capture_spec = cmd.capture_spec()?;
+        let command_id = self.register_handler(handler, capture_spec);
         if let Err(err) = self.register_command_in_mode(mode_id, cmd, command_id) {
             let _ = self.handlers.pop();
+            let _ = self.capture_specs.pop();
             return Err(err);
         }
         Ok(command_id)
@@ -621,6 +651,35 @@ impl Repl {
         }
     }
 
+    fn build_command_inputs(
+        &self,
+        command_id: CommandId,
+        captures: &[String],
+    ) -> Result<CommandInputs, HandlerError> {
+        let Some(capture_spec) = self.capture_specs.get(command_id as usize) else {
+            return Err(HandlerError(format!("invalid command id {}", command_id)));
+        };
+        if capture_spec.len() != captures.len() {
+            return Err(HandlerError("internal capture mismatch".to_string()));
+        }
+
+        let mut positionals = Vec::new();
+        let mut labeled = BTreeMap::new();
+        for (kind, value) in capture_spec.iter().zip(captures) {
+            match kind {
+                cmd::CaptureKind::Positional => positionals.push(value.clone()),
+                cmd::CaptureKind::Labeled(label) => {
+                    labeled.insert(label.clone(), value.clone());
+                }
+            }
+        }
+
+        Ok(CommandInputs {
+            positionals,
+            labeled,
+        })
+    }
+
     fn apply(&mut self, action: Action) -> Result<Action, ReplError> {
         match action {
             Action::None => Ok(Action::None),
@@ -639,10 +698,10 @@ impl Repl {
     fn invoke_handler(
         &mut self,
         command_id: CommandId,
-        inputs: &[String],
+        inputs: &CommandInputs,
     ) -> Result<Action, HandlerError> {
         let idx = command_id as usize;
-        if idx >= self.handlers.len() {
+        if idx >= self.handlers.len() || idx >= self.capture_specs.len() {
             return Err(HandlerError(format!("invalid command id {}", command_id)));
         }
 
@@ -742,7 +801,7 @@ impl Repl {
         let (command_id, captures) = {
             let mode = self.current_mode()?;
             let mut state = mode.root_state();
-            let mut captures: ParsedInputs = Vec::new();
+            let mut captures = Vec::new();
 
             for token in &tokens {
                 let step = match mode.step(state, token) {
@@ -763,7 +822,12 @@ impl Repl {
             (command_id, captures)
         };
 
-        let action = match self.invoke_handler(command_id, &captures) {
+        let inputs = match self.build_command_inputs(command_id, &captures) {
+            Ok(inputs) => inputs,
+            Err(err) => return Ok(RunOnceOutcome::HandlerError(err)),
+        };
+
+        let action = match self.invoke_handler(command_id, &inputs) {
             Ok(action) => action,
             Err(err) => return Ok(RunOnceOutcome::HandlerError(err)),
         };
@@ -794,6 +858,11 @@ impl Repl {
     fn handlers_len(&self) -> usize {
         self.handlers.len()
     }
+
+    #[cfg(test)]
+    fn capture_specs_len(&self) -> usize {
+        self.capture_specs.len()
+    }
 }
 
 impl Default for Repl {
@@ -814,6 +883,15 @@ mod tests {
     fn build_cmd(literals: &[&str], positional_args: u8) -> cmd::Cmd {
         let mut builder = cmd::CmdBuilder::new();
         builder.literals(literals).positional_args(positional_args);
+        builder.build()
+    }
+
+    fn build_labeled_cmd(literals: &[&str], labels: &[&str]) -> cmd::Cmd {
+        let mut builder = cmd::CmdBuilder::new();
+        builder.literals(literals);
+        for label in labels {
+            builder.labeled_arg(label);
+        }
         builder.build()
     }
 
@@ -900,6 +978,7 @@ mod tests {
         assert_eq!(repl.current_mode().unwrap().name(), "global");
         assert_eq!(repl.modes_len(), 1);
         assert_eq!(repl.handlers_len(), 0);
+        assert_eq!(repl.capture_specs_len(), 0);
     }
 
     #[test]
@@ -1006,21 +1085,22 @@ mod tests {
     fn register_handler_returns_sequential_command_ids() {
         let mut repl = Repl::new();
 
-        let a = repl.register_handler(noop_handler());
-        let b = repl.register_handler(noop_handler());
-        let c = repl.register_handler(noop_handler());
+        let a = repl.register_handler(noop_handler(), Vec::new());
+        let b = repl.register_handler(noop_handler(), vec![cmd::CaptureKind::Positional]);
+        let c = repl.register_handler(noop_handler(), Vec::new());
 
         assert_eq!(a, 0);
         assert_eq!(b, 1);
         assert_eq!(c, 2);
         assert_eq!(repl.handlers_len(), 3);
+        assert_eq!(repl.capture_specs_len(), 3);
     }
 
     #[test]
     fn register_command_in_mode_registers_syntax_with_given_command_id() {
         let mut repl = Repl::new();
         let cmd = build_cmd(&["show", "version"], 0);
-        let command_id = repl.register_handler(noop_handler());
+        let command_id = repl.register_handler(noop_handler(), cmd.capture_spec().unwrap());
 
         repl.register_command_in_mode(0, &cmd, command_id).unwrap();
 
@@ -1039,6 +1119,7 @@ mod tests {
 
         assert_eq!(command_id, 0);
         assert_eq!(repl.handlers_len(), 1);
+        assert_eq!(repl.capture_specs_len(), 1);
 
         let mode = repl.get_mode(0).unwrap();
         let show = mode.next_state(mode.root_state(), "show").unwrap();
@@ -1054,6 +1135,7 @@ mod tests {
         let first_id = repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
         assert_eq!(first_id, 0);
         assert_eq!(repl.handlers_len(), 1);
+        assert_eq!(repl.capture_specs_len(), 1);
 
         let err = repl
             .register_mode_command(0, &cmd, noop_handler())
@@ -1066,6 +1148,7 @@ mod tests {
             })
         );
         assert_eq!(repl.handlers_len(), 1);
+        assert_eq!(repl.capture_specs_len(), 1);
     }
 
     #[test]
@@ -1092,6 +1175,25 @@ mod tests {
                 attempted: 1,
             })
         );
+    }
+
+    #[test]
+    fn register_mode_command_rejects_duplicate_labeled_args() {
+        let mut repl = Repl::new();
+        let cmd = build_labeled_cmd(&["create", "account"], &["name", "name"]);
+
+        let err = repl
+            .register_mode_command(0, &cmd, noop_handler())
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            ReplError::CmdInsert(CommandRegistrationError::DuplicateLabeledArg {
+                label: "name".to_string()
+            })
+        );
+        assert_eq!(repl.handlers_len(), 0);
+        assert_eq!(repl.capture_specs_len(), 0);
     }
 
     #[test]
@@ -1625,7 +1727,7 @@ mod tests {
             0,
             &cmd,
             Box::new(move |_, inputs| {
-                *seen_clone.borrow_mut() = inputs.to_vec();
+                *seen_clone.borrow_mut() = inputs.positionals.clone();
                 Ok(Action::None)
             }),
         )
@@ -1652,7 +1754,7 @@ mod tests {
             0,
             &cmd,
             Box::new(move |_, inputs| {
-                *seen_clone.borrow_mut() = inputs.to_vec();
+                *seen_clone.borrow_mut() = inputs.positionals.clone();
                 Ok(Action::None)
             }),
         )
@@ -1679,7 +1781,7 @@ mod tests {
             0,
             &cmd,
             Box::new(move |_, inputs| {
-                *seen_clone.borrow_mut() = inputs.to_vec();
+                *seen_clone.borrow_mut() = inputs.positionals.clone();
                 Ok(Action::None)
             }),
         )
@@ -1687,6 +1789,109 @@ mod tests {
 
         let _ = repl.run_once("show ip eth0").unwrap();
         assert_eq!(&*seen.borrow(), &vec!["eth0".to_string()]);
+    }
+
+    #[test]
+    fn run_once_invokes_handler_with_labeled_inputs() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<BTreeMap<String, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let seen_clone = Rc::clone(&seen);
+        let cmd = build_labeled_cmd(&["create", "account"], &["name", "currency"]);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = inputs.labeled.clone();
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("create account name cash currency USD")
+                .unwrap(),
+            RunOnceOutcome::ActionApplied(Action::None)
+        );
+        assert_eq!(
+            &*seen.borrow(),
+            &BTreeMap::from([
+                ("currency".to_string(), "USD".to_string()),
+                ("name".to_string(), "cash".to_string())
+            ])
+        );
+    }
+
+    #[test]
+    fn run_once_invokes_handler_with_quoted_labeled_inputs() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<BTreeMap<String, String>>> = Rc::new(RefCell::new(BTreeMap::new()));
+        let seen_clone = Rc::clone(&seen);
+        let cmd = build_labeled_cmd(&["create", "account"], &["name", "currency"]);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = inputs.labeled.clone();
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("create account name \"cash account\" currency USD")
+                .unwrap(),
+            RunOnceOutcome::ActionApplied(Action::None)
+        );
+        assert_eq!(
+            seen.borrow().get("name"),
+            Some(&"cash account".to_string())
+        );
+    }
+
+    #[test]
+    fn run_once_invokes_handler_with_mixed_positional_and_labeled_inputs() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<Option<CommandInputs>>> = Rc::new(RefCell::new(None));
+        let seen_clone = Rc::clone(&seen);
+        let mut builder = cmd::CmdBuilder::new();
+        builder.literals(&["set"]).positional_args(1).labeled_arg("value");
+        let cmd = builder.build();
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = Some(inputs.clone());
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("set hostname value \"router one\"").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::None)
+        );
+        assert_eq!(
+            seen.borrow().as_ref(),
+            Some(&CommandInputs {
+                positionals: vec!["hostname".to_string()],
+                labeled: BTreeMap::from([(
+                    "value".to_string(),
+                    "router one".to_string()
+                )]),
+            })
+        );
     }
 
     #[test]
