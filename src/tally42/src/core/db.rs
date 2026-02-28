@@ -9,6 +9,38 @@ pub struct Db {
 }
 
 #[derive(Debug)]
+pub enum SchemaVersionError {
+    Sql(rusqlite::Error),
+    InvalidVersion(i64),
+}
+
+impl Display for SchemaVersionError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sql(err) => write!(f, "sqlite error while reading schema version: {err}"),
+            Self::InvalidVersion(version) => {
+                write!(f, "invalid schema version in database: {version}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchemaVersionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Sql(err) => Some(err),
+            Self::InvalidVersion(_) => None,
+        }
+    }
+}
+
+impl From<rusqlite::Error> for SchemaVersionError {
+    fn from(value: rusqlite::Error) -> Self {
+        Self::Sql(value)
+    }
+}
+
+#[derive(Debug)]
 pub enum DbError {
     Open(rusqlite::Error),
     DiscoverMigrations(MigrationDiscoveryError),
@@ -63,6 +95,18 @@ impl Db {
     }
     pub(crate) fn conn_mut(&mut self) -> &mut rusqlite::Connection {
         &mut self.conn
+    }
+
+    pub fn schema_version(&self) -> Result<u32, SchemaVersionError> {
+        let version: i64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SchemaVersionError::from)?;
+        u32::try_from(version).map_err(|_| SchemaVersionError::InvalidVersion(version))
     }
 }
 
@@ -130,4 +174,10 @@ mod tests {
         assert_eq!(applied_count, 4);
     }
 
+    #[test]
+    fn schema_version_returns_highest_applied_migration() {
+        let db = Db::open_for_tests().expect("open in-memory db");
+
+        assert_eq!(db.schema_version().expect("schema version"), 4);
+    }
 }

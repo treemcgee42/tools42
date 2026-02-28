@@ -7,4 +7,4 @@ mod transaction;
 mod user_data;
 
 pub use account::{Account, AccountListError};
-pub use core_api::Core;
+pub use core_api::{Core, VersionInfo};

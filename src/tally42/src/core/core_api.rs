@@ -1,5 +1,5 @@
 use super::account::AccountWriteError;
-use super::db::Db;
+use super::db::{Db, SchemaVersionError};
 use super::{Account, AccountListError};
 use super::user_data::{UserDataError, UserDataManager};
 use std::fmt::{Display, Formatter};
@@ -11,11 +11,19 @@ pub struct Core {
     _db: Db,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionInfo {
+    pub app_version: String,
+    pub schema_version: u32,
+    pub data_dir: PathBuf,
+}
+
 #[derive(Debug)]
 pub enum CoreError {
     UserData(UserDataError),
     AccountList(AccountListError),
     AccountWrite(AccountWriteError),
+    SchemaVersion(SchemaVersionError),
 }
 
 impl Display for CoreError {
@@ -24,6 +32,7 @@ impl Display for CoreError {
             Self::UserData(err) => write!(f, "failed to initialize core: {err}"),
             Self::AccountList(err) => write!(f, "failed to list accounts: {err}"),
             Self::AccountWrite(err) => write!(f, "failed to create account: {err}"),
+            Self::SchemaVersion(err) => write!(f, "failed to read schema version: {err}"),
         }
     }
 }
@@ -34,6 +43,7 @@ impl std::error::Error for CoreError {
             Self::UserData(err) => Some(err),
             Self::AccountList(err) => Some(err),
             Self::AccountWrite(err) => Some(err),
+            Self::SchemaVersion(err) => Some(err),
         }
     }
 }
@@ -53,6 +63,12 @@ impl From<AccountListError> for CoreError {
 impl From<AccountWriteError> for CoreError {
     fn from(value: AccountWriteError) -> Self {
         Self::AccountWrite(value)
+    }
+}
+
+impl From<SchemaVersionError> for CoreError {
+    fn from(value: SchemaVersionError) -> Self {
+        Self::SchemaVersion(value)
     }
 }
 
@@ -88,6 +104,14 @@ impl Core {
         self._db
             .create_account(Uuid::new_v4(), None, name, currency, Some(note))
             .map_err(CoreError::from)
+    }
+
+    pub fn version_info(&self) -> Result<VersionInfo, CoreError> {
+        Ok(VersionInfo {
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+            schema_version: self._db.schema_version().map_err(CoreError::from)?,
+            data_dir: self._user_data.data_dir().to_path_buf(),
+        })
     }
 
     pub fn delete_db_from_environment() -> Result<(PathBuf, bool), CoreError> {
@@ -163,5 +187,18 @@ mod tests {
 
         let accounts = core.list_accounts().expect("list accounts");
         assert_eq!(accounts, vec![created]);
+    }
+
+    #[test]
+    fn version_info_reports_app_schema_and_data_dir() {
+        let temp_dir = tempdir().expect("create temp dir");
+        let data_dir = temp_dir.path().join("state");
+        let core = Core::from_data_dir(&data_dir).expect("open core");
+
+        let info = core.version_info().expect("version info");
+
+        assert_eq!(info.app_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.schema_version, 4);
+        assert_eq!(info.data_dir, data_dir);
     }
 }

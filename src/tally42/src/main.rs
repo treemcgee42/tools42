@@ -1,6 +1,6 @@
 mod core;
 
-use core::{Account, Core};
+use core::{Account, Core, VersionInfo};
 use tli42::cmd::CmdBuilder;
 use tli42::repl::{Action, CommandInputs, CompletionItem, HandlerError, Repl, ReplError};
 
@@ -56,6 +56,21 @@ fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), Rep
         &show_accounts_cmd,
         Box::new(|_, _| {
             show_accounts_command()?;
+            Ok(Action::None)
+        }),
+    )?;
+
+    let mut show_version = CmdBuilder::new();
+    show_version
+        .literal_with_doc("show", "display read-only information")
+        .literal_with_doc("version", "show tally42 and schema versions")
+        .command_doc("show application and database schema version info");
+    let show_version_cmd = show_version.build();
+    repl.register_mode_command(
+        0,
+        &show_version_cmd,
+        Box::new(|_, _| {
+            show_version_command()?;
             Ok(Action::None)
         }),
     )?;
@@ -134,6 +149,13 @@ fn show_accounts_command() -> Result<(), HandlerError> {
     Ok(())
 }
 
+fn show_version_command() -> Result<(), HandlerError> {
+    let core = Core::from_environment().map_err(|err| HandlerError(err.to_string()))?;
+    let info = core.version_info().map_err(|err| HandlerError(err.to_string()))?;
+    print!("{}", format_version_info(&info));
+    Ok(())
+}
+
 fn create_account_command(inputs: &CommandInputs) -> Result<(), HandlerError> {
     let name = inputs
         .labeled
@@ -178,6 +200,15 @@ fn format_accounts(accounts: &[Account]) -> String {
 
 fn format_created_account(account: &Account) -> String {
     format!("created account {} ({})\n", account.name, account.currency)
+}
+
+fn format_version_info(info: &VersionInfo) -> String {
+    format!(
+        "tally42 version: {}\ndb schema version: {}\ndata dir: {}\n",
+        info.app_version,
+        info.schema_version,
+        info.data_dir.display()
+    )
 }
 
 #[cfg(test)]
@@ -246,10 +277,16 @@ mod tests {
         let outcome = repl.run_once("show ?").expect("completion should succeed");
         assert_eq!(
             outcome,
-            RunOnceOutcome::Completions(vec![CompletionItem {
-                token: "accounts".to_string(),
-                doc: Some("list accounts".to_string()),
-            }])
+            RunOnceOutcome::Completions(vec![
+                CompletionItem {
+                    token: "accounts".to_string(),
+                    doc: Some("list accounts".to_string()),
+                },
+                CompletionItem {
+                    token: "version".to_string(),
+                    doc: Some("show tally42 and schema versions".to_string()),
+                },
+            ])
         );
     }
 
@@ -350,6 +387,19 @@ mod tests {
     }
 
     #[test]
+    fn show_version_command_is_registered() {
+        let mut repl = build_repl().expect("repl should build");
+
+        let outcome = repl
+            .run_once("show version")
+            .expect("run_once should succeed");
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::ActionApplied(Action::None) | RunOnceOutcome::HandlerError(_)
+        ));
+    }
+
+    #[test]
     fn create_account_command_is_registered() {
         let mut repl = build_repl().expect("repl should build");
         repl.run_once("write").expect("enter write mode");
@@ -413,5 +463,19 @@ mod tests {
         };
 
         assert_eq!(format_created_account(&account), "created account cash (USD)\n");
+    }
+
+    #[test]
+    fn format_version_info_renders_expected_output() {
+        let info = VersionInfo {
+            app_version: "0.1.0".to_string(),
+            schema_version: 4,
+            data_dir: std::path::PathBuf::from("/tmp/tally42"),
+        };
+
+        assert_eq!(
+            format_version_info(&info),
+            "tally42 version: 0.1.0\ndb schema version: 4\ndata dir: /tmp/tally42\n"
+        );
     }
 }
