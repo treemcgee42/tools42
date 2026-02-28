@@ -122,6 +122,129 @@ pub(crate) fn format_completions(items: &[CompletionItem]) -> String {
     out
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionSnapshot {
+    modes: Vec<mode::Mode>,
+    stack: Vec<ModeId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TabCompletion {
+    pub insert_suffix: String,
+}
+
+impl CompletionSnapshot {
+    fn current_mode_id(&self) -> Result<ModeId, ReplError> {
+        self.stack.last().copied().ok_or(ReplError::EmptyModeStack)
+    }
+
+    fn current_mode(&self) -> Result<&mode::Mode, ReplError> {
+        let id = self.current_mode_id()?;
+        self.modes
+            .get(id as usize)
+            .ok_or(ReplError::InvalidModeId(id))
+    }
+
+    pub(crate) fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
+        let req = Repl::completion_request_from_prefix(prefix);
+        self.complete_request(&req)
+    }
+
+    fn complete_request(&self, req: &CompletionRequest) -> Result<Vec<CompletionItem>, ReplError> {
+        let mode = self.current_mode()?;
+        let mut state = mode.root_state();
+
+        for token in &req.exact_tokens {
+            let step = match mode.step(state, token) {
+                Some(step) => step,
+                None => return Ok(Vec::new()),
+            };
+            state = step.next_state;
+        }
+
+        let mut completions = mode
+            .get_completions_with_docs(state, &req.partial)
+            .into_iter()
+            .map(|(token, doc)| CompletionItem {
+                token: token.to_string(),
+                doc: doc.map(str::to_string),
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(doc) = mode.command_doc_at(state)? {
+            completions.push(CompletionItem {
+                token: RET_COMPLETION_TOKEN.to_string(),
+                doc: Some(doc.to_string()),
+            });
+        }
+        completions.sort_by(|a, b| a.token.cmp(&b.token));
+        Ok(completions)
+    }
+
+    pub(crate) fn tab_completion(&self, prefix: &str) -> Result<Option<TabCompletion>, ReplError> {
+        let req = Repl::completion_request_from_prefix(prefix);
+        let mode = self.current_mode()?;
+        let mut state = mode.root_state();
+
+        for token in &req.exact_tokens {
+            let step = match mode.step(state, token) {
+                Some(step) => step,
+                None => return Ok(None),
+            };
+            state = step.next_state;
+        }
+
+        let mut candidates = mode
+            .get_completions(state, &req.partial)
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        candidates.sort();
+        if candidates.is_empty() {
+            return Ok(None);
+        }
+
+        let replacement = if candidates.len() == 1 {
+            candidates[0].clone()
+        } else {
+            longest_common_prefix(&candidates)
+        };
+
+        if replacement == req.partial {
+            return Ok(None);
+        }
+
+        let Some(insert_suffix) = replacement.strip_prefix(&req.partial) else {
+            return Ok(None);
+        };
+        Ok(Some(TabCompletion {
+            insert_suffix: insert_suffix.to_string(),
+        }))
+    }
+}
+
+fn longest_common_prefix(candidates: &[String]) -> String {
+    let Some(first) = candidates.first() else {
+        return String::new();
+    };
+
+    let mut prefix = first.clone();
+    for candidate in &candidates[1..] {
+        let matched_bytes = prefix
+            .char_indices()
+            .zip(candidate.chars())
+            .take_while(|((_, a), b)| *a == *b)
+            .map(|((idx, ch), _)| idx + ch.len_utf8())
+            .last()
+            .unwrap_or(0);
+        prefix.truncate(matched_bytes);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+    prefix
+}
+
 impl Repl {
     pub fn new() -> Self {
         Self {
@@ -345,39 +468,18 @@ impl Repl {
     }
 
     fn complete_request(&self, req: &CompletionRequest) -> Result<Vec<CompletionItem>, ReplError> {
-        let mode = self.current_mode()?;
-        let mut state = mode.root_state();
-
-        for token in &req.exact_tokens {
-            let step = match mode.step(state, token) {
-                Some(step) => step,
-                None => return Ok(Vec::new()),
-            };
-            state = step.next_state;
-        }
-
-        let mut completions = mode
-            .get_completions_with_docs(state, &req.partial)
-            .into_iter()
-            .map(|(token, doc)| CompletionItem {
-                token: token.to_string(),
-                doc: doc.map(str::to_string),
-            })
-            .collect::<Vec<_>>();
-
-        if let Some(doc) = mode.command_doc_at(state)? {
-            completions.push(CompletionItem {
-                token: RET_COMPLETION_TOKEN.to_string(),
-                doc: Some(doc.to_string()),
-            });
-        }
-        completions.sort_by(|a, b| a.token.cmp(&b.token));
-        Ok(completions)
+        self.completion_snapshot().complete_request(req)
     }
 
     fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
-        let req = Self::completion_request_from_prefix(prefix);
-        self.complete_request(&req)
+        self.completion_snapshot().complete_prefix(prefix)
+    }
+
+    pub(crate) fn completion_snapshot(&self) -> CompletionSnapshot {
+        CompletionSnapshot {
+            modes: self.modes.clone(),
+            stack: self.stack.clone(),
+        }
     }
 
     fn complete_line(&self, line: &str) -> Result<Option<Vec<CompletionItem>>, ReplError> {
@@ -436,6 +538,7 @@ impl Repl {
 
     fn run_with_editor<E: editor::LineEditor>(&mut self, editor: &mut E) -> io::Result<()> {
         loop {
+            editor.set_completion_snapshot(self.completion_snapshot())?;
             let prompt = self
                 .prompt()
                 .map_err(|e| io::Error::other(format!("repl prompt error: {:?}", e)))?;
@@ -898,6 +1001,53 @@ mod tests {
                     doc: Some("bar doc".to_string())
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_tab_completion_returns_single_match_replacement() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["show"], 0), noop_handler())
+            .unwrap();
+
+        assert_eq!(
+            repl.completion_snapshot().tab_completion("sh").unwrap(),
+            Some(TabCompletion {
+                insert_suffix: "ow".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn completion_snapshot_tab_completion_returns_longest_common_prefix() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["delete-db"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["describe"], 0), noop_handler())
+            .unwrap();
+
+        assert_eq!(
+            repl.completion_snapshot().tab_completion("d").unwrap(),
+            Some(TabCompletion {
+                insert_suffix: "e".to_string()
+            })
+        );
+        assert_eq!(
+            repl.completion_snapshot().tab_completion("de").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn longest_common_prefix_handles_disjoint_and_shared_candidates() {
+        assert_eq!(longest_common_prefix(&[]), "");
+        assert_eq!(
+            longest_common_prefix(&["bar".to_string(), "baz".to_string()]),
+            "ba"
+        );
+        assert_eq!(
+            longest_common_prefix(&["alpha".to_string(), "beta".to_string()]),
+            ""
         );
     }
 

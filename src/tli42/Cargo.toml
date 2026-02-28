@@ -8,4 +8,4 @@ default = ["rustyline"]
 rustyline = ["dep:rustyline"]
 
 [dependencies]
-rustyline = { version = "17.0.2", optional = true }
+rustyline = { version = "17.0.2", optional = true, features = ["custom-bindings"] }

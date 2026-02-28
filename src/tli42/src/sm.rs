@@ -32,13 +32,13 @@ pub(crate) struct StepResult {
     pub(crate) matched: MatchedEdgeKind,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct State {
     edges: Vec<EdgeLink>,
     accept: Option<AcceptMeta>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Sm {
     // Initial state is 0.
     states: Vec<State>,
