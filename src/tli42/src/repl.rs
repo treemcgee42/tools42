@@ -1,5 +1,6 @@
 use crate::{cmd, editor, mode, sm};
 use std::io;
+use std::fmt;
 
 pub type ModeId = u32;
 pub type CommandId = u32;
@@ -92,6 +93,7 @@ pub enum RunOnceOutcome {
     Completions(Vec<CompletionItem>),
     UnknownCommand,
     IncompleteCommand,
+    ParseError(ParseLineError),
     HandlerError(HandlerError),
     ActionApplied(Action),
 }
@@ -100,6 +102,109 @@ pub enum RunOnceOutcome {
 struct CompletionRequest {
     exact_tokens: Vec<String>,
     partial: String,
+}
+
+enum ParsedCompletionRequest {
+    NotARequest,
+    Disabled,
+    Request(CompletionRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseLineError {
+    UnterminatedQuote,
+    UnexpectedQuote,
+    TrailingCharactersAfterQuote,
+}
+
+impl fmt::Display for ParseLineError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnterminatedQuote => write!(f, "unterminated quote"),
+            Self::UnexpectedQuote => write!(f, "unexpected quote in unquoted token"),
+            Self::TrailingCharactersAfterQuote => {
+                write!(f, "unexpected trailing characters after closing quote")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedLine {
+    tokens: Vec<String>,
+    ends_with_whitespace: bool,
+    ended_after_quoted_token: bool,
+}
+
+enum ParseState {
+    Outside,
+    Bare(String),
+    Quoted(String),
+    AfterQuoted(String),
+}
+
+fn parse_line(line: &str) -> Result<ParsedLine, ParseLineError> {
+    let mut tokens = Vec::new();
+    let mut state = ParseState::Outside;
+    let mut ends_with_whitespace = false;
+
+    for ch in line.chars() {
+        ends_with_whitespace = ch.is_whitespace();
+        state = match state {
+            ParseState::Outside => {
+                if ch.is_whitespace() {
+                    ParseState::Outside
+                } else if ch == '"' {
+                    ParseState::Quoted(String::new())
+                } else {
+                    let mut buf = String::new();
+                    buf.push(ch);
+                    ParseState::Bare(buf)
+                }
+            }
+            ParseState::Bare(mut buf) => {
+                if ch.is_whitespace() {
+                    tokens.push(buf);
+                    ParseState::Outside
+                } else if ch == '"' {
+                    return Err(ParseLineError::UnexpectedQuote);
+                } else {
+                    buf.push(ch);
+                    ParseState::Bare(buf)
+                }
+            }
+            ParseState::Quoted(mut buf) => {
+                if ch == '"' {
+                    ParseState::AfterQuoted(buf)
+                } else {
+                    buf.push(ch);
+                    ParseState::Quoted(buf)
+                }
+            }
+            ParseState::AfterQuoted(buf) => {
+                if ch.is_whitespace() {
+                    tokens.push(buf);
+                    ParseState::Outside
+                } else {
+                    return Err(ParseLineError::TrailingCharactersAfterQuote);
+                }
+            }
+        };
+    }
+
+    let ended_after_quoted_token = matches!(state, ParseState::AfterQuoted(_));
+
+    match state {
+        ParseState::Outside => {}
+        ParseState::Bare(buf) | ParseState::AfterQuoted(buf) => tokens.push(buf),
+        ParseState::Quoted(_) => return Err(ParseLineError::UnterminatedQuote),
+    }
+
+    Ok(ParsedLine {
+        tokens,
+        ends_with_whitespace,
+        ended_after_quoted_token,
+    })
 }
 
 pub(crate) fn format_completions(items: &[CompletionItem]) -> String {
@@ -161,7 +266,9 @@ impl CompletionSnapshot {
     }
 
     pub(crate) fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
-        let req = Repl::completion_request_from_prefix(prefix);
+        let Some(req) = Repl::completion_request_from_prefix(prefix) else {
+            return Ok(Vec::new());
+        };
         self.complete_request(&req)
     }
 
@@ -197,7 +304,9 @@ impl CompletionSnapshot {
     }
 
     pub(crate) fn tab_completion(&self, prefix: &str) -> Result<Option<TabCompletion>, ReplError> {
-        let req = Repl::completion_request_from_prefix(prefix);
+        let Some(req) = Repl::completion_request_from_prefix(prefix) else {
+            return Ok(None);
+        };
         let mode = self.current_mode()?;
         let mut state = mode.root_state();
 
@@ -397,10 +506,6 @@ impl Repl {
         Ok(format!("{}> ", names.join("/")))
     }
 
-    fn tokenize(&self, line: &str) -> ParsedInputs {
-        line.split_whitespace().map(str::to_string).collect()
-    }
-
     fn normalize_stem(stem: &str) -> Result<Vec<String>, ReplError> {
         let tokens = stem
             .split_whitespace()
@@ -453,41 +558,43 @@ impl Repl {
         Ok((state, literal.as_str()))
     }
 
-    fn parse_completion_request(&self, line: &str) -> Option<CompletionRequest> {
+    fn parse_completion_request(&self, line: &str) -> ParsedCompletionRequest {
         let line = line.trim_end_matches(['\n', '\r']);
         let q_count = line.chars().filter(|&c| c == '?').count();
         if q_count != 1 || !line.ends_with('?') {
-            return None;
+            return ParsedCompletionRequest::NotARequest;
         }
 
         let prefix = &line[..line.len() - 1];
-        Some(Self::completion_request_from_prefix(prefix))
+        match Self::completion_request_from_prefix(prefix) {
+            Some(req) => ParsedCompletionRequest::Request(req),
+            None => ParsedCompletionRequest::Disabled,
+        }
     }
 
-    fn completion_request_from_prefix(prefix: &str) -> CompletionRequest {
-        if prefix.trim().is_empty() {
-            return CompletionRequest {
+    fn completion_request_from_prefix(prefix: &str) -> Option<CompletionRequest> {
+        let parsed = parse_line(prefix).ok()?;
+
+        if parsed.tokens.is_empty() {
+            return Some(CompletionRequest {
                 exact_tokens: Vec::new(),
                 partial: String::new(),
-            };
+            });
         }
 
-        if prefix.chars().last().is_some_and(char::is_whitespace) {
-            return CompletionRequest {
-                exact_tokens: prefix.split_whitespace().map(str::to_string).collect(),
+        if parsed.ends_with_whitespace || parsed.ended_after_quoted_token {
+            return Some(CompletionRequest {
+                exact_tokens: parsed.tokens,
                 partial: String::new(),
-            };
+            });
         }
 
-        let mut tokens = prefix
-            .split_whitespace()
-            .map(str::to_string)
-            .collect::<Vec<_>>();
+        let mut tokens = parsed.tokens;
         let partial = tokens.pop().unwrap_or_default();
-        CompletionRequest {
+        Some(CompletionRequest {
             exact_tokens: tokens,
             partial,
-        }
+        })
     }
 
     fn complete_request(&self, req: &CompletionRequest) -> Result<Vec<CompletionItem>, ReplError> {
@@ -507,11 +614,11 @@ impl Repl {
     }
 
     fn complete_line(&self, line: &str) -> Result<Option<Vec<CompletionItem>>, ReplError> {
-        let req = match self.parse_completion_request(line) {
-            Some(req) => req,
-            None => return Ok(None),
-        };
-        Ok(Some(self.complete_request(&req)?))
+        match self.parse_completion_request(line) {
+            ParsedCompletionRequest::NotARequest => Ok(None),
+            ParsedCompletionRequest::Disabled => Ok(Some(Vec::new())),
+            ParsedCompletionRequest::Request(req) => Ok(Some(self.complete_request(&req)?)),
+        }
     }
 
     fn apply(&mut self, action: Action) -> Result<Action, ReplError> {
@@ -557,7 +664,10 @@ impl Repl {
         if line.trim().is_empty() {
             return false;
         }
-        self.parse_completion_request(line).is_none()
+        matches!(
+            self.parse_completion_request(line),
+            ParsedCompletionRequest::NotARequest
+        )
     }
 
     fn run_with_editor<E: editor::LineEditor>(&mut self, editor: &mut E) -> io::Result<()> {
@@ -591,6 +701,9 @@ impl Repl {
                 RunOnceOutcome::IncompleteCommand => {
                     println!("incomplete command");
                 }
+                RunOnceOutcome::ParseError(err) => {
+                    println!("parse error: {}", err);
+                }
                 RunOnceOutcome::HandlerError(err) => {
                     println!("handler error: {}", err.0);
                 }
@@ -607,10 +720,14 @@ impl Repl {
             return Ok(RunOnceOutcome::Completions(completions));
         }
 
-        let tokens = self.tokenize(line);
-        if tokens.is_empty() {
+        let parsed = match parse_line(line) {
+            Ok(parsed) => parsed,
+            Err(err) => return Ok(RunOnceOutcome::ParseError(err)),
+        };
+        if parsed.tokens.is_empty() {
             return Ok(RunOnceOutcome::Noop);
         }
+        let tokens = parsed.tokens;
 
         if tokens.first().map(String::as_str) == Some("exit") {
             let action = if self.current_mode_id()? == 0 {
@@ -718,6 +835,60 @@ mod tests {
                 .collect(),
             partial: partial.to_string(),
         }
+    }
+
+    #[test]
+    fn parse_line_splits_bare_tokens() {
+        assert_eq!(
+            parse_line("show ip route").unwrap(),
+            ParsedLine {
+                tokens: vec!["show".to_string(), "ip".to_string(), "route".to_string()],
+                ends_with_whitespace: false,
+                ended_after_quoted_token: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_line_keeps_quoted_text_as_single_token() {
+        assert_eq!(
+            parse_line("note \"foo bar\"").unwrap(),
+            ParsedLine {
+                tokens: vec!["note".to_string(), "foo bar".to_string()],
+                ends_with_whitespace: false,
+                ended_after_quoted_token: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_line_accepts_empty_quoted_token() {
+        assert_eq!(
+            parse_line("\"\"").unwrap(),
+            ParsedLine {
+                tokens: vec![String::new()],
+                ends_with_whitespace: false,
+                ended_after_quoted_token: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_line_rejects_unterminated_quote() {
+        assert_eq!(parse_line("note \"foo").unwrap_err(), ParseLineError::UnterminatedQuote);
+    }
+
+    #[test]
+    fn parse_line_rejects_quote_inside_bare_token() {
+        assert_eq!(parse_line("foo\"bar").unwrap_err(), ParseLineError::UnexpectedQuote);
+    }
+
+    #[test]
+    fn parse_line_rejects_trailing_characters_after_quote() {
+        assert_eq!(
+            parse_line("\"foo\"bar").unwrap_err(),
+            ParseLineError::TrailingCharactersAfterQuote
+        );
     }
 
     #[test]
@@ -1012,7 +1183,7 @@ mod tests {
     fn completion_request_from_prefix_parses_empty_partial_after_whitespace() {
         assert_eq!(
             Repl::completion_request_from_prefix("show ip "),
-            completion_request(&["show", "ip"], "")
+            Some(completion_request(&["show", "ip"], ""))
         );
     }
 
@@ -1020,7 +1191,37 @@ mod tests {
     fn completion_request_from_prefix_parses_trailing_partial_token() {
         assert_eq!(
             Repl::completion_request_from_prefix("show ver"),
-            completion_request(&["show"], "ver")
+            Some(completion_request(&["show"], "ver"))
+        );
+    }
+
+    #[test]
+    fn completion_request_from_prefix_treats_closed_quoted_token_as_complete() {
+        assert_eq!(
+            Repl::completion_request_from_prefix("note \"foo bar\""),
+            Some(completion_request(&["note", "foo bar"], ""))
+        );
+    }
+
+    #[test]
+    fn completion_request_from_prefix_disables_completion_inside_open_quote() {
+        assert_eq!(Repl::completion_request_from_prefix("note \"foo"), None);
+    }
+
+    #[test]
+    fn completion_request_from_prefix_disables_completion_for_malformed_quote() {
+        assert_eq!(Repl::completion_request_from_prefix("\"foo\"bar"), None);
+    }
+
+    #[test]
+    fn run_once_completion_inside_open_quote_returns_empty_completions() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["note"], 1), noop_handler())
+            .unwrap();
+
+        assert_eq!(
+            repl.run_once("note \"foo ?").unwrap(),
+            RunOnceOutcome::Completions(Vec::new())
         );
     }
 
@@ -1438,6 +1639,33 @@ mod tests {
     }
 
     #[test]
+    fn run_once_invokes_handler_with_quoted_var_input() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        let mut repl = Repl::new();
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen_clone = Rc::clone(&seen);
+        let cmd = build_cmd(&["note"], 1);
+
+        repl.register_mode_command(
+            0,
+            &cmd,
+            Box::new(move |_, inputs| {
+                *seen_clone.borrow_mut() = inputs.to_vec();
+                Ok(Action::None)
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            repl.run_once("note \"foo bar\"").unwrap(),
+            RunOnceOutcome::ActionApplied(Action::None)
+        );
+        assert_eq!(&*seen.borrow(), &vec!["foo bar".to_string()]);
+    }
+
+    #[test]
     fn run_once_does_not_capture_literal_tokens() {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -1509,6 +1737,17 @@ mod tests {
         assert_eq!(
             repl.run_once("boom").unwrap(),
             RunOnceOutcome::HandlerError(HandlerError("boom".to_string()))
+        );
+        assert_eq!(repl.current_mode_id().unwrap(), 0);
+    }
+
+    #[test]
+    fn run_once_returns_parse_error_for_unterminated_quote() {
+        let mut repl = Repl::new();
+
+        assert_eq!(
+            repl.run_once("note \"foo").unwrap(),
+            RunOnceOutcome::ParseError(ParseLineError::UnterminatedQuote)
         );
         assert_eq!(repl.current_mode_id().unwrap(), 0);
     }
