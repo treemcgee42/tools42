@@ -1,5 +1,5 @@
-use crate::{cmd, mode, sm};
-use std::io::{self, Write};
+use crate::{cmd, editor, mode, sm};
+use std::io;
 
 pub type ModeId = u32;
 pub type CommandId = u32;
@@ -90,6 +90,36 @@ pub enum RunOnceOutcome {
 struct CompletionRequest {
     exact_tokens: Vec<String>,
     partial: String,
+}
+
+pub(crate) fn format_completions(items: &[CompletionItem]) -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str("Possible completions:\n");
+
+    if items.is_empty() {
+        out.push_str("  (none)\n\n");
+        return out;
+    }
+
+    let width = items
+        .iter()
+        .filter(|item| !item.token.is_empty())
+        .map(|item| item.token.len())
+        .max()
+        .unwrap_or(0);
+
+    for item in items {
+        match item.doc.as_deref() {
+            Some(doc) => {
+                out.push_str(&format!("  {:<width$}  {}\n", item.token, doc, width = width));
+            }
+            None => out.push_str(&format!("  {}\n", item.token)),
+        }
+    }
+
+    out.push('\n');
+    out
 }
 
 impl Repl {
@@ -397,33 +427,52 @@ impl Repl {
         result
     }
 
-    fn print_completions(items: Vec<CompletionItem>) {
-        println!();
-        println!("Possible completions:");
-
-        if items.is_empty() {
-            println!("  (none)");
-            println!();
-            return;
+    fn should_add_history_entry(&self, line: &str) -> bool {
+        if line.trim().is_empty() {
+            return false;
         }
+        self.parse_completion_request(line).is_none()
+    }
 
-        let width = items
-            .iter()
-            .filter(|item| !item.token.is_empty())
-            .map(|item| item.token.len())
-            .max()
-            .unwrap_or(0);
+    fn run_with_editor<E: editor::LineEditor>(&mut self, editor: &mut E) -> io::Result<()> {
+        loop {
+            let prompt = self
+                .prompt()
+                .map_err(|e| io::Error::other(format!("repl prompt error: {:?}", e)))?;
 
-        for item in items {
-            match item.doc {
-                Some(doc) => {
-                    println!("  {:<width$}  {}", item.token, doc, width = width);
+            let line = match editor.read_line(&prompt)? {
+                editor::EditorRead::Line(line) => line,
+                editor::EditorRead::Interrupted => continue,
+                editor::EditorRead::Eof => break,
+            };
+
+            if self.should_add_history_entry(&line) {
+                editor.add_history_entry(&line)?;
+            }
+
+            match self
+                .run_once(&line)
+                .map_err(|e| io::Error::other(format!("repl runtime error: {:?}", e)))?
+            {
+                RunOnceOutcome::Noop => {}
+                RunOnceOutcome::Completions(items) => {
+                    editor.print_completions(&items)?;
                 }
-                None => println!("  {}", item.token),
+                RunOnceOutcome::UnknownCommand => {
+                    println!("unknown command");
+                }
+                RunOnceOutcome::IncompleteCommand => {
+                    println!("incomplete command");
+                }
+                RunOnceOutcome::HandlerError(err) => {
+                    println!("handler error: {}", err.0);
+                }
+                RunOnceOutcome::ActionApplied(Action::Exit) => break,
+                RunOnceOutcome::ActionApplied(_) => {}
             }
         }
 
-        println!();
+        Ok(())
     }
 
     pub fn run_once(&mut self, line: &str) -> Result<RunOnceOutcome, ReplError> {
@@ -480,46 +529,8 @@ impl Repl {
     }
 
     pub fn run(&mut self) -> io::Result<()> {
-        let stdin = io::stdin();
-        let mut stdout = io::stdout();
-        let mut line = String::new();
-
-        loop {
-            line.clear();
-            let prompt = self
-                .prompt()
-                .map_err(|e| io::Error::other(format!("repl prompt error: {:?}", e)))?;
-            print!("{}", prompt);
-            stdout.flush()?;
-
-            let bytes = stdin.read_line(&mut line)?;
-            if bytes == 0 {
-                break;
-            }
-
-            match self
-                .run_once(&line)
-                .map_err(|e| io::Error::other(format!("repl runtime error: {:?}", e)))?
-            {
-                RunOnceOutcome::Noop => {}
-                RunOnceOutcome::Completions(items) => {
-                    Self::print_completions(items);
-                }
-                RunOnceOutcome::UnknownCommand => {
-                    println!("unknown command");
-                }
-                RunOnceOutcome::IncompleteCommand => {
-                    println!("incomplete command");
-                }
-                RunOnceOutcome::HandlerError(err) => {
-                    println!("handler error: {}", err.0);
-                }
-                RunOnceOutcome::ActionApplied(Action::Exit) => break,
-                RunOnceOutcome::ActionApplied(_) => {}
-            }
-        }
-
-        Ok(())
+        let mut editor = editor::BasicEditor::new();
+        self.run_with_editor(&mut editor)
     }
 
     #[cfg(test)]
@@ -536,6 +547,7 @@ impl Repl {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor;
 
     fn noop_handler() -> Handler {
         Box::new(|_, _| Ok(Action::None))
@@ -879,6 +891,81 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn format_completions_renders_doc_table_and_empty_state() {
+        assert_eq!(
+            format_completions(&[]),
+            "\nPossible completions:\n  (none)\n\n"
+        );
+        assert_eq!(
+            format_completions(&[
+                CompletionItem {
+                    token: "RET".to_string(),
+                    doc: Some("run foo".to_string())
+                },
+                CompletionItem {
+                    token: "bar".to_string(),
+                    doc: None
+                }
+            ]),
+            "\nPossible completions:\n  RET  run foo\n  bar\n\n"
+        );
+    }
+
+    struct MockEditor {
+        reads: Vec<editor::EditorRead>,
+        prompts: Vec<String>,
+        printed: Vec<Vec<CompletionItem>>,
+        history: Vec<String>,
+    }
+
+    impl MockEditor {
+        fn new(reads: Vec<editor::EditorRead>) -> Self {
+            Self {
+                reads,
+                prompts: Vec::new(),
+                printed: Vec::new(),
+                history: Vec::new(),
+            }
+        }
+    }
+
+    impl editor::LineEditor for MockEditor {
+        fn read_line(&mut self, prompt: &str) -> io::Result<editor::EditorRead> {
+            self.prompts.push(prompt.to_string());
+            Ok(self.reads.remove(0))
+        }
+
+        fn print_completions(&mut self, items: &[CompletionItem]) -> io::Result<()> {
+            self.printed.push(items.to_vec());
+            Ok(())
+        }
+
+        fn add_history_entry(&mut self, line: &str) -> io::Result<()> {
+            self.history.push(line.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_with_editor_routes_help_output_and_history() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["show"], 0), noop_handler())
+            .unwrap();
+
+        let mut editor = MockEditor::new(vec![
+            editor::EditorRead::Line("?\n".to_string()),
+            editor::EditorRead::Line("show\n".to_string()),
+            editor::EditorRead::Eof,
+        ]);
+
+        repl.run_with_editor(&mut editor).unwrap();
+
+        assert_eq!(editor.prompts, vec!["global> ", "global> ", "global> "]);
+        assert_eq!(editor.printed, vec![completion_items(&["show"])]);
+        assert_eq!(editor.history, vec!["show\n".to_string()]);
     }
 
     #[test]
