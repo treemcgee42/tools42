@@ -529,6 +529,14 @@ impl Repl {
     }
 
     pub fn run(&mut self) -> io::Result<()> {
+        if editor::prefer_rustyline_backend() {
+            #[cfg(feature = "rustyline")]
+            {
+                let mut editor = editor::RustylineEditor::new()?;
+                return self.run_with_editor(&mut editor);
+            }
+        }
+
         let mut editor = editor::BasicEditor::new();
         self.run_with_editor(&mut editor)
     }
