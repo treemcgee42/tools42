@@ -37,7 +37,9 @@ impl Mode {
         cmd: &cmd::Cmd,
         command_id: sm::CommandId,
     ) -> Result<(), sm::CmdInsertError> {
-        self.sm.insert_cmd(cmd, command_id)
+        self.sm.insert_cmd(cmd, command_id)?;
+        self.apply_cmd_docs(cmd)?;
+        Ok(())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -103,6 +105,37 @@ impl Mode {
         state_id: sm::StateId,
     ) -> Result<Option<&str>, sm::CmdInsertError> {
         self.sm.command_doc_at(state_id)
+    }
+
+    fn apply_cmd_docs(&mut self, cmd: &cmd::Cmd) -> Result<(), sm::CmdInsertError> {
+        let mut current_state = self.root_state();
+
+        for atom in cmd.traversal_atoms() {
+            match atom {
+                cmd::TraversalAtom::Literal { token, doc } => {
+                    let next_state = self
+                        .sm
+                        .literal_edge_state(current_state, &token)?
+                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
+                    if let Some(doc) = doc {
+                        let _ = self.sm.set_literal_edge_doc(current_state, &token, doc)?;
+                    }
+                    current_state = next_state;
+                }
+                cmd::TraversalAtom::Var | cmd::TraversalAtom::LabeledVar => {
+                    current_state = self
+                        .sm
+                        .var_edge_state(current_state)?
+                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
+                }
+            }
+        }
+
+        if let Some(doc) = cmd.command_doc() {
+            let _ = self.sm.set_command_doc(current_state, doc.to_string())?;
+        }
+
+        Ok(())
     }
 }
 

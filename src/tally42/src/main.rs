@@ -24,7 +24,6 @@ fn build_repl() -> Result<Repl, ReplError> {
     let write_mode_id = register_write_mode(&mut repl)?;
     register_root_commands(&mut repl, write_mode_id)?;
     register_write_mode_commands(&mut repl, write_mode_id)?;
-    register_docs(&mut repl, write_mode_id)?;
     Ok(repl)
 }
 
@@ -35,7 +34,9 @@ fn register_write_mode(repl: &mut Repl) -> Result<u32, ReplError> {
 
 fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
     let mut write = CmdBuilder::new();
-    write.literals(&["write"]);
+    write
+        .literal_with_doc("write", "enter write mode")
+        .command_doc("enter write mode commands");
     let write_cmd = write.build();
 
     repl.register_mode_command(
@@ -45,7 +46,10 @@ fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), Rep
     )?;
 
     let mut show_accounts = CmdBuilder::new();
-    show_accounts.literals(&["show", "accounts"]);
+    show_accounts
+        .literal_with_doc("show", "display read-only information")
+        .literal_with_doc("accounts", "list accounts")
+        .command_doc("list all accounts in the database");
     let show_accounts_cmd = show_accounts.build();
     repl.register_mode_command(
         0,
@@ -62,10 +66,11 @@ fn register_root_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), Rep
 fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
     let mut create_account = CmdBuilder::new();
     create_account
-        .literals(&["create", "account"])
-        .labeled_arg("name")
-        .labeled_arg("currency")
-        .labeled_arg("note");
+        .literal_with_doc("create", "create data in the tally database")
+        .literal_with_doc("account", "create an account")
+        .labeled_arg_with_doc("name", "set the account name")
+        .labeled_arg_with_doc("currency", "set the account currency")
+        .labeled_arg_with_doc("note", "set the account note");
     let create_account_cmd = create_account.build();
     repl.register_mode_command(
         write_mode_id,
@@ -77,7 +82,8 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
     )?;
 
     let mut init = CmdBuilder::new();
-    init.literals(&["init"]);
+    init.literal_with_doc("init", "initialize the tally database")
+        .command_doc("create the tally database and schema");
     let init_cmd = init.build();
     repl.register_mode_command(
         write_mode_id,
@@ -89,7 +95,9 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
     )?;
 
     let mut delete_db = CmdBuilder::new();
-    delete_db.literals(&["delete-db"]);
+    delete_db
+        .literal_with_doc("delete-db", "delete the tally database file")
+        .command_doc("remove the tally database from disk");
     let delete_db_cmd = delete_db.build();
     repl.register_mode_command(
         write_mode_id,
@@ -99,27 +107,6 @@ fn register_write_mode_commands(repl: &mut Repl, write_mode_id: u32) -> Result<(
             Ok(Action::None)
         }),
     )?;
-
-    Ok(())
-}
-
-fn register_docs(repl: &mut Repl, write_mode_id: u32) -> Result<(), ReplError> {
-    repl.set_edge_doc(0, "show", "display read-only information")?;
-    repl.set_edge_doc(0, "show accounts", "list accounts")?;
-    repl.set_command_doc(0, "show accounts", "list all accounts in the database")?;
-
-    repl.set_edge_doc(0, "write", "enter write mode")?;
-    repl.set_command_doc(0, "write", "enter write mode commands")?;
-
-    repl.set_edge_doc(write_mode_id, "create", "create data in the tally database")?;
-    repl.set_edge_doc(write_mode_id, "create account", "create an account")?;
-    repl.set_edge_doc(write_mode_id, "create account name", "set the account name")?;
-
-    repl.set_edge_doc(write_mode_id, "init", "initialize the tally database")?;
-    repl.set_command_doc(write_mode_id, "init", "create the tally database and schema")?;
-
-    repl.set_edge_doc(write_mode_id, "delete-db", "delete the tally database file")?;
-    repl.set_command_doc(write_mode_id, "delete-db", "remove the tally database from disk")?;
 
     Ok(())
 }
@@ -310,7 +297,7 @@ mod tests {
             outcome,
             RunOnceOutcome::Completions(vec![CompletionItem {
                 token: "note".to_string(),
-                doc: None,
+                doc: Some("set the account note".to_string()),
             }])
         );
     }

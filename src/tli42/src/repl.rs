@@ -667,8 +667,8 @@ impl Repl {
         let mut labeled = BTreeMap::new();
         for (kind, value) in capture_spec.iter().zip(captures) {
             match kind {
-                cmd::CaptureKind::Positional => positionals.push(value.clone()),
-                cmd::CaptureKind::Labeled(label) => {
+                cmd::CaptureKind::Positional { .. } => positionals.push(value.clone()),
+                cmd::CaptureKind::Labeled { label, .. } => {
                     labeled.insert(label.clone(), value.clone());
                 }
             }
@@ -1086,7 +1086,13 @@ mod tests {
         let mut repl = Repl::new();
 
         let a = repl.register_handler(noop_handler(), Vec::new());
-        let b = repl.register_handler(noop_handler(), vec![cmd::CaptureKind::Positional]);
+        let b = repl.register_handler(
+            noop_handler(),
+            vec![cmd::CaptureKind::Positional {
+                name: None,
+                doc: None,
+            }],
+        );
         let c = repl.register_handler(noop_handler(), Vec::new());
 
         assert_eq!(a, 0);
@@ -1094,6 +1100,86 @@ mod tests {
         assert_eq!(c, 2);
         assert_eq!(repl.handlers_len(), 3);
         assert_eq!(repl.capture_specs_len(), 3);
+    }
+
+    #[test]
+    fn builder_integrated_literal_and_command_docs_are_applied_on_registration() {
+        let mut repl = Repl::new();
+        let mut builder = cmd::CmdBuilder::new();
+        builder
+            .literal_with_doc("show", "show data")
+            .literal_with_doc("version", "show version")
+            .command_doc("show software version");
+        let cmd = builder.build();
+
+        repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "show".to_string(),
+                doc: Some("show data".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("show ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "version".to_string(),
+                doc: Some("show version".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("show version ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: RET_COMPLETION_TOKEN.to_string(),
+                doc: Some("show software version".to_string())
+            }])
+        );
+    }
+
+    #[test]
+    fn builder_integrated_docs_apply_to_literals_after_vars() {
+        let mut repl = Repl::new();
+        let mut builder = cmd::CmdBuilder::new();
+        builder
+            .literal_with_doc("create", "create data")
+            .literal_with_doc("account", "create account")
+            .labeled_arg_with_doc("name", "account name")
+            .labeled_arg_with_doc("currency", "account currency")
+            .labeled_arg_with_doc("note", "account note");
+        let cmd = builder.build();
+
+        repl.register_mode_command(0, &cmd, noop_handler()).unwrap();
+
+        assert_eq!(
+            repl.run_once("create ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "account".to_string(),
+                doc: Some("create account".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("create account ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "name".to_string(),
+                doc: Some("account name".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("create account name cash ?").unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "currency".to_string(),
+                doc: Some("account currency".to_string())
+            }])
+        );
+        assert_eq!(
+            repl.run_once("create account name cash currency USD ?")
+                .unwrap(),
+            RunOnceOutcome::Completions(vec![CompletionItem {
+                token: "note".to_string(),
+                doc: Some("account note".to_string())
+            }])
+        );
     }
 
     #[test]

@@ -347,6 +347,58 @@ impl Sm {
         Ok(false)
     }
 
+    pub(crate) fn literal_edge_state(
+        &self,
+        current_state: StateId,
+        literal: &str,
+    ) -> Result<Option<StateId>, CmdInsertError> {
+        let state = self
+            .states
+            .get(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut found = None;
+        for link in &state.edges {
+            if let Edge::Literal(existing_literal) = &link.edge
+                && existing_literal == literal
+            {
+                if found.is_some() {
+                    return Err(CmdInsertError::DuplicateLiteralEdges {
+                        state: current_state,
+                        literal: literal.to_string(),
+                    });
+                }
+                found = Some(link.next_state);
+            }
+        }
+
+        Ok(found)
+    }
+
+    pub(crate) fn var_edge_state(&self, current_state: StateId) -> Result<Option<StateId>, CmdInsertError> {
+        let state = self
+            .states
+            .get(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut found = None;
+        let mut count = 0usize;
+        for link in &state.edges {
+            if matches!(link.edge, Edge::Var) {
+                count += 1;
+                if count == 1 {
+                    found = Some(link.next_state);
+                }
+            }
+        }
+
+        if count > 1 {
+            return Err(CmdInsertError::MultipleVarEdges(current_state));
+        }
+
+        Ok(found)
+    }
+
     pub(crate) fn set_command_doc(
         &mut self,
         state_id: StateId,

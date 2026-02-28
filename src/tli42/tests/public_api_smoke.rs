@@ -117,12 +117,12 @@ fn public_repl_question_returns_doc_annotated_completion() {
     let mut repl = Repl::new();
 
     let mut builder = CmdBuilder::new();
-    builder.literals(&["write"]);
+    builder
+        .literal_with_doc("write", "enter write mode")
+        .command_doc("enter write mode commands");
     let write_cmd = builder.build();
     repl.register_mode_command(0, &write_cmd, Box::new(|_, _| Ok(Action::None)))
         .expect("register write");
-    repl.set_edge_doc(0, "write", "enter write mode")
-        .expect("set edge doc");
 
     let outcome = repl.run_once("?").expect("run_once");
     assert_eq!(
@@ -139,21 +139,18 @@ fn public_repl_question_includes_ret_for_accepting_prefix_with_doc() {
     let mut repl = Repl::new();
 
     let mut builder = CmdBuilder::new();
-    builder.literals(&["foo"]);
+    builder.literal_with_doc("foo", "run foo").command_doc("run foo");
     let foo_cmd = builder.build();
     repl.register_mode_command(0, &foo_cmd, Box::new(|_, _| Ok(Action::None)))
         .expect("register foo");
 
     let mut builder = CmdBuilder::new();
-    builder.literals(&["foo", "bar"]);
+    builder
+        .literals(&["foo"])
+        .literal_with_doc("bar", "run bar");
     let bar_cmd = builder.build();
     repl.register_mode_command(0, &bar_cmd, Box::new(|_, _| Ok(Action::None)))
         .expect("register foo bar");
-
-    repl.set_command_doc(0, "foo", "run foo")
-        .expect("set command doc");
-    repl.set_edge_doc(0, "foo bar", "run bar")
-        .expect("set edge doc");
 
     let outcome = repl.run_once("foo ?").expect("run_once");
     assert_eq!(
@@ -168,5 +165,31 @@ fn public_repl_question_includes_ret_for_accepting_prefix_with_doc() {
                 doc: Some("run bar".to_string()),
             },
         ])
+    );
+}
+
+#[test]
+fn public_repl_builder_docs_work_after_labeled_values() {
+    let mut repl = Repl::new();
+
+    let mut builder = CmdBuilder::new();
+    builder
+        .literal_with_doc("create", "create data")
+        .literal_with_doc("account", "create an account")
+        .labeled_arg_with_doc("name", "account name")
+        .literal_with_doc("currency", "account currency");
+    let cmd = builder.build();
+    repl.register_mode_command(0, &cmd, Box::new(|_, _| Ok(Action::None)))
+        .expect("register create account");
+
+    let outcome = repl
+        .run_once("create account name cash ?")
+        .expect("run_once");
+    assert_eq!(
+        outcome,
+        RunOnceOutcome::Completions(vec![CompletionItem {
+            token: "currency".to_string(),
+            doc: Some("account currency".to_string()),
+        }])
     );
 }

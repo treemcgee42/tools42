@@ -3,8 +3,14 @@ use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaptureKind {
-    Positional,
-    Labeled(String),
+    Positional {
+        name: Option<String>,
+        doc: Option<String>,
+    },
+    Labeled {
+        label: String,
+        doc: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,9 +20,18 @@ pub(crate) enum CmdSchemaError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Atom {
-    Literal(String),
-    Var,
-    LabeledVar(String),
+    Literal {
+        token: String,
+        doc: Option<String>,
+    },
+    Var {
+        name: Option<String>,
+        doc: Option<String>,
+    },
+    LabeledVar {
+        label: String,
+        doc: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +46,7 @@ enum Expr {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cmd {
     exprs: Vec<Expr>,
+    command_doc: Option<String>,
 }
 
 pub struct CmdBuilder {
@@ -46,7 +62,10 @@ impl Default for CmdBuilder {
 impl CmdBuilder {
     pub fn new() -> Self {
         Self {
-            cmd: Cmd { exprs: Vec::new() },
+            cmd: Cmd {
+                exprs: Vec::new(),
+                command_doc: None,
+            },
         }
     }
 
@@ -57,9 +76,20 @@ impl CmdBuilder {
 
         let atoms = literals
             .iter()
-            .map(|s| Atom::Literal((*s).to_string()))
+            .map(|s| Atom::Literal {
+                token: (*s).to_string(),
+                doc: None,
+            })
             .collect::<Vec<_>>();
         self.cmd.exprs.push(Expr::Sequence(atoms));
+        self
+    }
+
+    pub fn literal_with_doc(&mut self, literal: &str, doc: impl Into<String>) -> &mut Self {
+        self.cmd.exprs.push(Expr::Sequence(vec![Atom::Literal {
+            token: literal.to_string(),
+            doc: Some(doc.into()),
+        }]));
         self
     }
 
@@ -68,22 +98,71 @@ impl CmdBuilder {
             return self;
         }
 
-        let atoms = (0..num).map(|_| Atom::Var).collect::<Vec<_>>();
+        let atoms = (0..num)
+            .map(|_| Atom::Var {
+                name: None,
+                doc: None,
+            })
+            .collect::<Vec<_>>();
         self.cmd.exprs.push(Expr::Sequence(atoms));
+        self
+    }
+
+    pub fn positional_arg_with_doc(&mut self, name: &str, doc: impl Into<String>) -> &mut Self {
+        self.cmd.exprs.push(Expr::Sequence(vec![Atom::Var {
+            name: Some(name.to_string()),
+            doc: Some(doc.into()),
+        }]));
         self
     }
 
     pub fn labeled_arg(&mut self, label: &str) -> &mut Self {
         self.cmd.exprs.push(Expr::Sequence(vec![
-            Atom::Literal(label.to_string()),
-            Atom::LabeledVar(label.to_string()),
+            Atom::Literal {
+                token: label.to_string(),
+                doc: None,
+            },
+            Atom::LabeledVar {
+                label: label.to_string(),
+                doc: None,
+            },
         ]));
+        self
+    }
+
+    pub fn labeled_arg_with_doc(&mut self, label: &str, doc: impl Into<String>) -> &mut Self {
+        let doc = doc.into();
+        self.cmd.exprs.push(Expr::Sequence(vec![
+            Atom::Literal {
+                token: label.to_string(),
+                doc: Some(doc.clone()),
+            },
+            Atom::LabeledVar {
+                label: label.to_string(),
+                doc: Some(doc),
+            },
+        ]));
+        self
+    }
+
+    pub fn command_doc(&mut self, doc: impl Into<String>) -> &mut Self {
+        self.cmd.command_doc = Some(doc.into());
         self
     }
 
     pub fn build(self) -> Cmd {
         self.cmd
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TraversalAtom {
+    Literal {
+        token: String,
+        doc: Option<String>,
+    },
+    Var,
+    LabeledVar,
 }
 
 impl Cmd {
@@ -96,15 +175,21 @@ impl Cmd {
                 Expr::Sequence(atoms) => {
                     for atom in atoms {
                         match atom {
-                            Atom::Literal(_) => {}
-                            Atom::Var => capture_spec.push(CaptureKind::Positional),
-                            Atom::LabeledVar(label) => {
+                            Atom::Literal { .. } => {}
+                            Atom::Var { name, doc } => capture_spec.push(CaptureKind::Positional {
+                                name: name.clone(),
+                                doc: doc.clone(),
+                            }),
+                            Atom::LabeledVar { label, doc } => {
                                 if !seen_labeled.insert(label.clone()) {
                                     return Err(CmdSchemaError::DuplicateLabeledArg {
                                         label: label.clone(),
                                     });
                                 }
-                                capture_spec.push(CaptureKind::Labeled(label.clone()));
+                                capture_spec.push(CaptureKind::Labeled {
+                                    label: label.clone(),
+                                    doc: doc.clone(),
+                                });
                             }
                         }
                     }
@@ -113,6 +198,31 @@ impl Cmd {
         }
 
         Ok(capture_spec)
+    }
+
+    pub(crate) fn traversal_atoms(&self) -> Vec<TraversalAtom> {
+        let mut atoms = Vec::new();
+        for expr in &self.exprs {
+            match expr {
+                Expr::Sequence(seq) => {
+                    for atom in seq {
+                        match atom {
+                            Atom::Literal { token, doc } => atoms.push(TraversalAtom::Literal {
+                                token: token.clone(),
+                                doc: doc.clone(),
+                            }),
+                            Atom::Var { .. } => atoms.push(TraversalAtom::Var),
+                            Atom::LabeledVar { .. } => atoms.push(TraversalAtom::LabeledVar),
+                        }
+                    }
+                }
+            }
+        }
+        atoms
+    }
+
+    pub(crate) fn command_doc(&self) -> Option<&str> {
+        self.command_doc.as_deref()
     }
 }
 
@@ -123,8 +233,8 @@ impl sm::Sm {
         atom: &Atom,
     ) -> Result<sm::StateId, sm::CmdInsertError> {
         match atom {
-            Atom::Literal(literal) => self.ensure_literal_edge(current_state, literal),
-            Atom::Var | Atom::LabeledVar(_) => self.ensure_var_edge(current_state),
+            Atom::Literal { token, .. } => self.ensure_literal_edge(current_state, token),
+            Atom::Var { .. } | Atom::LabeledVar { .. } => self.ensure_var_edge(current_state),
         }
     }
 
@@ -171,10 +281,25 @@ mod tests {
             cmd.exprs,
             vec![
                 Expr::Sequence(vec![
-                    Atom::Literal("show".to_string()),
-                    Atom::Literal("ip".to_string())
+                    Atom::Literal {
+                        token: "show".to_string(),
+                        doc: None
+                    },
+                    Atom::Literal {
+                        token: "ip".to_string(),
+                        doc: None
+                    }
                 ]),
-                Expr::Sequence(vec![Atom::Var, Atom::Var]),
+                Expr::Sequence(vec![
+                    Atom::Var {
+                        name: None,
+                        doc: None
+                    },
+                    Atom::Var {
+                        name: None,
+                        doc: None
+                    }
+                ]),
             ]
         );
     }
@@ -192,16 +317,34 @@ mod tests {
             cmd.exprs,
             vec![
                 Expr::Sequence(vec![
-                    Atom::Literal("create".to_string()),
-                    Atom::Literal("account".to_string())
+                    Atom::Literal {
+                        token: "create".to_string(),
+                        doc: None
+                    },
+                    Atom::Literal {
+                        token: "account".to_string(),
+                        doc: None
+                    }
                 ]),
                 Expr::Sequence(vec![
-                    Atom::Literal("name".to_string()),
-                    Atom::LabeledVar("name".to_string())
+                    Atom::Literal {
+                        token: "name".to_string(),
+                        doc: None
+                    },
+                    Atom::LabeledVar {
+                        label: "name".to_string(),
+                        doc: None
+                    }
                 ]),
                 Expr::Sequence(vec![
-                    Atom::Literal("currency".to_string()),
-                    Atom::LabeledVar("currency".to_string())
+                    Atom::Literal {
+                        token: "currency".to_string(),
+                        doc: None
+                    },
+                    Atom::LabeledVar {
+                        label: "currency".to_string(),
+                        doc: None
+                    }
                 ]),
             ]
         );
@@ -219,8 +362,73 @@ mod tests {
         assert_eq!(
             cmd.capture_spec().unwrap(),
             vec![
-                CaptureKind::Positional,
-                CaptureKind::Labeled("value".to_string())
+                CaptureKind::Positional {
+                    name: None,
+                    doc: None
+                },
+                CaptureKind::Labeled {
+                    label: "value".to_string(),
+                    doc: None
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn builder_supports_integrated_docs() {
+        let mut builder = CmdBuilder::new();
+        builder
+            .literal_with_doc("show", "show things")
+            .labeled_arg_with_doc("name", "account name")
+            .positional_arg_with_doc("target", "target value")
+            .command_doc("run the command");
+        let cmd = builder.build();
+
+        assert_eq!(
+            cmd.exprs,
+            vec![
+                Expr::Sequence(vec![Atom::Literal {
+                    token: "show".to_string(),
+                    doc: Some("show things".to_string())
+                }]),
+                Expr::Sequence(vec![
+                    Atom::Literal {
+                        token: "name".to_string(),
+                        doc: Some("account name".to_string())
+                    },
+                    Atom::LabeledVar {
+                        label: "name".to_string(),
+                        doc: Some("account name".to_string())
+                    }
+                ]),
+                Expr::Sequence(vec![Atom::Var {
+                    name: Some("target".to_string()),
+                    doc: Some("target value".to_string())
+                }]),
+            ]
+        );
+        assert_eq!(cmd.command_doc(), Some("run the command"));
+    }
+
+    #[test]
+    fn capture_spec_retains_doc_metadata() {
+        let mut builder = CmdBuilder::new();
+        builder
+            .positional_arg_with_doc("iface", "interface name")
+            .labeled_arg_with_doc("value", "configured value");
+        let cmd = builder.build();
+
+        assert_eq!(
+            cmd.capture_spec().unwrap(),
+            vec![
+                CaptureKind::Positional {
+                    name: Some("iface".to_string()),
+                    doc: Some("interface name".to_string())
+                },
+                CaptureKind::Labeled {
+                    label: "value".to_string(),
+                    doc: Some("configured value".to_string())
+                }
             ]
         );
     }
