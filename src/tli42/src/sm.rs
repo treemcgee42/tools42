@@ -61,8 +61,14 @@ struct StateScan<'a> {
 pub(crate) enum CmdInsertError {
     InvalidState(StateId),
     MultipleVarEdges(StateId),
-    DuplicateLiteralEdges { state: StateId, literal: String },
-    DuplicateCommandPath { existing: CommandId, attempted: CommandId },
+    DuplicateLiteralEdges {
+        state: StateId,
+        literal: String,
+    },
+    DuplicateCommandPath {
+        existing: CommandId,
+        attempted: CommandId,
+    },
 }
 
 impl Sm {
@@ -187,7 +193,8 @@ impl Sm {
 
     /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
     pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
-        self.step(current_state, input_token).map(|step| step.next_state)
+        self.step(current_state, input_token)
+            .map(|step| step.next_state)
     }
 
     /// Starting at `current_state`, if there is a literal edge for `literal` already, return
@@ -298,10 +305,7 @@ impl Sm {
         Ok(())
     }
 
-    pub(crate) fn accept_at(
-        &self,
-        state_id: StateId,
-    ) -> Result<Option<CommandId>, CmdInsertError> {
+    pub(crate) fn accept_at(&self, state_id: StateId) -> Result<Option<CommandId>, CmdInsertError> {
         let state = self
             .states
             .get(state_id)
@@ -358,10 +362,7 @@ impl Sm {
         Ok(true)
     }
 
-    pub(crate) fn command_doc_at(
-        &self,
-        state_id: StateId,
-    ) -> Result<Option<&str>, CmdInsertError> {
+    pub(crate) fn command_doc_at(&self, state_id: StateId) -> Result<Option<&str>, CmdInsertError> {
         let state = self
             .states
             .get(state_id)
@@ -545,10 +546,13 @@ mod tests {
 
     #[test]
     fn ensure_literal_edge_reuses_existing_edge() {
-        let mut sm = sm_with_states(vec![State {
-            edges: vec![lit_edge("show", 1)],
-            accept: None,
-        }, State::default()]);
+        let mut sm = sm_with_states(vec![
+            State {
+                edges: vec![lit_edge("show", 1)],
+                accept: None,
+            },
+            State::default(),
+        ]);
 
         let first = sm.ensure_literal_edge(0, "show").unwrap();
         let second = sm.ensure_literal_edge(0, "show").unwrap();
@@ -560,10 +564,13 @@ mod tests {
 
     #[test]
     fn ensure_var_edge_reuses_existing_edge() {
-        let mut sm = sm_with_states(vec![State {
-            edges: vec![var_edge(1)],
-            accept: None,
-        }, State::default()]);
+        let mut sm = sm_with_states(vec![
+            State {
+                edges: vec![var_edge(1)],
+                accept: None,
+            },
+            State::default(),
+        ]);
 
         let first = sm.ensure_var_edge(0).unwrap();
         let second = sm.ensure_var_edge(0).unwrap();

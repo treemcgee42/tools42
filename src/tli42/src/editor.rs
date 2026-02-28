@@ -221,8 +221,16 @@ mod tests {
 
     #[test]
     fn should_use_rustyline_backend_requires_interactive_non_dumb_terminal() {
-        assert!(!should_use_rustyline_backend(false, true, Some("xterm-256color")));
-        assert!(!should_use_rustyline_backend(true, false, Some("xterm-256color")));
+        assert!(!should_use_rustyline_backend(
+            false,
+            true,
+            Some("xterm-256color")
+        ));
+        assert!(!should_use_rustyline_backend(
+            true,
+            false,
+            Some("xterm-256color")
+        ));
         assert!(!should_use_rustyline_backend(true, true, Some("dumb")));
         assert!(!should_use_rustyline_backend(true, true, None));
 

@@ -24,8 +24,14 @@ const RET_COMPLETION_TOKEN: &str = "RET";
 pub enum CommandRegistrationError {
     InvalidState(u32),
     MultipleVarEdges(u32),
-    DuplicateLiteralEdges { state: u32, literal: String },
-    DuplicateCommandPath { existing: CommandId, attempted: CommandId },
+    DuplicateLiteralEdges {
+        state: u32,
+        literal: String,
+    },
+    DuplicateCommandPath {
+        existing: CommandId,
+        attempted: CommandId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +50,9 @@ pub enum ReplError {
 impl From<sm::CmdInsertError> for ReplError {
     fn from(value: sm::CmdInsertError) -> Self {
         let mapped = match value {
-            sm::CmdInsertError::InvalidState(state) => CommandRegistrationError::InvalidState(
-                state as u32,
-            ),
+            sm::CmdInsertError::InvalidState(state) => {
+                CommandRegistrationError::InvalidState(state as u32)
+            }
             sm::CmdInsertError::MultipleVarEdges(state) => {
                 CommandRegistrationError::MultipleVarEdges(state as u32)
             }
@@ -56,9 +62,13 @@ impl From<sm::CmdInsertError> for ReplError {
                     literal,
                 }
             }
-            sm::CmdInsertError::DuplicateCommandPath { existing, attempted } => {
-                CommandRegistrationError::DuplicateCommandPath { existing, attempted }
-            }
+            sm::CmdInsertError::DuplicateCommandPath {
+                existing,
+                attempted,
+            } => CommandRegistrationError::DuplicateCommandPath {
+                existing,
+                attempted,
+            },
         };
         Self::CmdInsert(mapped)
     }
@@ -112,7 +122,12 @@ pub(crate) fn format_completions(items: &[CompletionItem]) -> String {
     for item in items {
         match item.doc.as_deref() {
             Some(doc) => {
-                out.push_str(&format!("  {:<width$}  {}\n", item.token, doc, width = width));
+                out.push_str(&format!(
+                    "  {:<width$}  {}\n",
+                    item.token,
+                    doc,
+                    width = width
+                ));
             }
             None => out.push_str(&format!("  {}\n", item.token)),
         }
@@ -396,7 +411,11 @@ impl Repl {
         Ok(tokens)
     }
 
-    fn resolve_state_path(&self, mode_id: ModeId, tokens: &[String]) -> Result<sm::StateId, ReplError> {
+    fn resolve_state_path(
+        &self,
+        mode_id: ModeId,
+        tokens: &[String],
+    ) -> Result<sm::StateId, ReplError> {
         let mode = self.get_mode(mode_id)?;
         let mut state = mode.root_state();
         for token in tokens {
@@ -459,7 +478,10 @@ impl Repl {
             };
         }
 
-        let mut tokens = prefix.split_whitespace().map(str::to_string).collect::<Vec<_>>();
+        let mut tokens = prefix
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let partial = tokens.pop().unwrap_or_default();
         CompletionRequest {
             exact_tokens: tokens,
@@ -682,7 +704,10 @@ mod tests {
 
     fn completion_request(exact_tokens: &[&str], partial: &str) -> CompletionRequest {
         CompletionRequest {
-            exact_tokens: exact_tokens.iter().map(|token| (*token).to_string()).collect(),
+            exact_tokens: exact_tokens
+                .iter()
+                .map(|token| (*token).to_string())
+                .collect(),
             partial: partial.to_string(),
         }
     }
@@ -749,7 +774,10 @@ mod tests {
     fn push_mode_rejects_invalid_id() {
         let mut repl = Repl::new();
 
-        assert_eq!(repl.push_mode(99).unwrap_err(), ReplError::InvalidModeId(99));
+        assert_eq!(
+            repl.push_mode(99).unwrap_err(),
+            ReplError::InvalidModeId(99)
+        );
     }
 
     #[test]
@@ -768,7 +796,10 @@ mod tests {
         let mut repl = Repl::new();
         repl.stack.clear();
 
-        assert_eq!(repl.current_mode_id().unwrap_err(), ReplError::EmptyModeStack);
+        assert_eq!(
+            repl.current_mode_id().unwrap_err(),
+            ReplError::EmptyModeStack
+        );
         assert_eq!(repl.current_mode().unwrap_err(), ReplError::EmptyModeStack);
         assert_eq!(repl.pop_mode().unwrap_err(), ReplError::EmptyModeStack);
     }
@@ -863,9 +894,7 @@ mod tests {
         let mut repl = Repl::new();
         let cmd = build_cmd(&["show"], 0);
 
-        let err = repl
-            .register_command_in_mode(99, &cmd, 0)
-            .unwrap_err();
+        let err = repl.register_command_in_mode(99, &cmd, 0).unwrap_err();
         assert_eq!(err, ReplError::InvalidModeId(99));
     }
 
@@ -899,8 +928,10 @@ mod tests {
         let mut repl = Repl::new();
         let show = build_cmd(&["show"], 0);
         let write = build_cmd(&["write"], 0);
-        repl.register_mode_command(0, &write, noop_handler()).unwrap();
-        repl.register_mode_command(0, &show, noop_handler()).unwrap();
+        repl.register_mode_command(0, &write, noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &show, noop_handler())
+            .unwrap();
 
         assert_eq!(
             repl.run_once("?").unwrap(),
@@ -913,8 +944,10 @@ mod tests {
         let mut repl = Repl::new();
         let show_ip = build_cmd(&["show", "ip"], 0);
         let show_version = build_cmd(&["show", "version"], 0);
-        repl.register_mode_command(0, &show_version, noop_handler()).unwrap();
-        repl.register_mode_command(0, &show_ip, noop_handler()).unwrap();
+        repl.register_mode_command(0, &show_version, noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &show_ip, noop_handler())
+            .unwrap();
 
         assert_eq!(
             repl.run_once("show ?").unwrap(),
@@ -927,8 +960,10 @@ mod tests {
         let mut repl = Repl::new();
         let delete_db = build_cmd(&["delete-db"], 0);
         let describe = build_cmd(&["describe"], 0);
-        repl.register_mode_command(0, &delete_db, noop_handler()).unwrap();
-        repl.register_mode_command(0, &describe, noop_handler()).unwrap();
+        repl.register_mode_command(0, &delete_db, noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &describe, noop_handler())
+            .unwrap();
 
         assert_eq!(
             repl.run_once("de?").unwrap(),
@@ -941,8 +976,10 @@ mod tests {
         let mut repl = Repl::new();
         let route = build_cmd(&["show", "ip", "route"], 0);
         let iface = build_cmd(&["show", "ip", "interface"], 0);
-        repl.register_mode_command(0, &route, noop_handler()).unwrap();
-        repl.register_mode_command(0, &iface, noop_handler()).unwrap();
+        repl.register_mode_command(0, &route, noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &iface, noop_handler())
+            .unwrap();
 
         assert_eq!(
             repl.run_once("sh ip ?").unwrap(),
@@ -954,7 +991,8 @@ mod tests {
     fn run_once_completion_invalid_prefix_path_returns_empty_completions() {
         let mut repl = Repl::new();
         let show = build_cmd(&["show"], 0);
-        repl.register_mode_command(0, &show, noop_handler()).unwrap();
+        repl.register_mode_command(0, &show, noop_handler())
+            .unwrap();
 
         assert_eq!(
             repl.run_once("bogus ?").unwrap(),
@@ -988,7 +1026,10 @@ mod tests {
         repl.set_command_doc(0, "foo", "foo doc").unwrap();
         repl.set_edge_doc(0, "foo bar", "bar doc").unwrap();
 
-        assert_eq!(repl.complete_prefix("").unwrap(), completion_items(&["foo"]));
+        assert_eq!(
+            repl.complete_prefix("").unwrap(),
+            completion_items(&["foo"])
+        );
         assert_eq!(
             repl.complete_prefix("foo ").unwrap(),
             vec![
@@ -1275,7 +1316,10 @@ mod tests {
         repl.register_mode_command(0, &build_cmd(&["write"], 0), noop_handler())
             .unwrap();
 
-        assert_eq!(repl.set_edge_doc(0, "   ", "doc").unwrap_err(), ReplError::InvalidDocStem);
+        assert_eq!(
+            repl.set_edge_doc(0, "   ", "doc").unwrap_err(),
+            ReplError::InvalidDocStem
+        );
         assert_eq!(
             repl.set_edge_doc(0, "missing", "doc").unwrap_err(),
             ReplError::DocPathNotFound("missing".to_string())
@@ -1340,7 +1384,10 @@ mod tests {
     fn run_once_returns_unknown_for_unmatched_command() {
         let mut repl = Repl::new();
 
-        assert_eq!(repl.run_once("nope").unwrap(), RunOnceOutcome::UnknownCommand);
+        assert_eq!(
+            repl.run_once("nope").unwrap(),
+            RunOnceOutcome::UnknownCommand
+        );
     }
 
     #[test]

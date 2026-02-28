@@ -2,7 +2,7 @@ use std::collections::{HashMap, hash_map};
 
 type InternedStringType = u32;
 
-struct  StringInterner {
+struct StringInterner {
     string_to_interned_value: HashMap<String, InternedStringType>,
     interned_value_to_string: Vec<String>,
 }
@@ -91,7 +91,10 @@ impl Trie {
         Trie {
             string_interner: StringInterner::new(),
             nodes: Vec::new(),
-            root: TrieNode { value: None, children: HashMap::new() },
+            root: TrieNode {
+                value: None,
+                children: HashMap::new(),
+            },
         }
     }
 
@@ -121,7 +124,9 @@ impl Trie {
                     self.root.children.insert(interned_token, new_idx);
                 }
                 Some(node_idx) => {
-                    self.nodes[node_idx].children.insert(interned_token, new_idx);
+                    self.nodes[node_idx]
+                        .children
+                        .insert(interned_token, new_idx);
                 }
             }
 
@@ -420,10 +425,7 @@ mod trie_tests {
         let got = sorted_completions(&trie, "alp");
         assert_eq!(
             got,
-            vec![
-                ("alpha".to_string(), None),
-                ("alphabet".to_string(), None)
-            ]
+            vec![("alpha".to_string(), None), ("alphabet".to_string(), None)]
         );
     }
 }

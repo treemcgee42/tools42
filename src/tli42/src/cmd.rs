@@ -27,9 +27,7 @@ pub struct CmdBuilder {
 impl CmdBuilder {
     pub fn new() -> Self {
         Self {
-            cmd: Cmd {
-                exprs: Vec::new(),
-            },
+            cmd: Cmd { exprs: Vec::new() },
         }
     }
 

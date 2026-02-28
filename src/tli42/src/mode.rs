@@ -67,7 +67,8 @@ impl Mode {
         current_state: sm::StateId,
         partial_token: &str,
     ) -> Vec<(&'a str, Option<&'a str>)> {
-        self.sm.get_completions_with_docs(current_state, partial_token)
+        self.sm
+            .get_completions_with_docs(current_state, partial_token)
     }
 
     pub(crate) fn accept_at(
@@ -162,7 +163,10 @@ mod tests {
         config.insert_cmd(&cfg_cmd, 2).unwrap();
 
         assert_eq!(exec.get_completions(exec.root_state(), "s"), vec!["show"]);
-        assert_eq!(config.get_completions(config.root_state(), "s"), vec!["set"]);
+        assert_eq!(
+            config.get_completions(config.root_state(), "s"),
+            vec!["set"]
+        );
         assert!(exec.next_state(exec.root_state(), "set").is_none());
         assert!(config.next_state(config.root_state(), "show").is_none());
     }

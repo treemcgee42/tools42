@@ -26,7 +26,10 @@ fn public_repl_register_and_run_once_captures_vars() {
 
     let outcome = repl.run_once("show ip eth0 brief").expect("run_once");
     assert_eq!(outcome, RunOnceOutcome::ActionApplied(Action::None));
-    assert_eq!(&*seen.borrow(), &vec!["eth0".to_string(), "brief".to_string()]);
+    assert_eq!(
+        &*seen.borrow(),
+        &vec!["eth0".to_string(), "brief".to_string()]
+    );
 }
 
 #[test]
