@@ -288,41 +288,40 @@ impl Repl {
         }
 
         let prefix = &line[..line.len() - 1];
+        Some(Self::completion_request_from_prefix(prefix))
+    }
+
+    fn completion_request_from_prefix(prefix: &str) -> CompletionRequest {
         if prefix.trim().is_empty() {
-            return Some(CompletionRequest {
+            return CompletionRequest {
                 exact_tokens: Vec::new(),
                 partial: String::new(),
-            });
+            };
         }
 
         if prefix.chars().last().is_some_and(char::is_whitespace) {
-            return Some(CompletionRequest {
+            return CompletionRequest {
                 exact_tokens: prefix.split_whitespace().map(str::to_string).collect(),
                 partial: String::new(),
-            });
+            };
         }
 
         let mut tokens = prefix.split_whitespace().map(str::to_string).collect::<Vec<_>>();
         let partial = tokens.pop().unwrap_or_default();
-        Some(CompletionRequest {
+        CompletionRequest {
             exact_tokens: tokens,
             partial,
-        })
+        }
     }
 
-    fn complete_line(&self, line: &str) -> Result<Option<Vec<CompletionItem>>, ReplError> {
-        let req = match self.parse_completion_request(line) {
-            Some(req) => req,
-            None => return Ok(None),
-        };
-
+    fn complete_request(&self, req: &CompletionRequest) -> Result<Vec<CompletionItem>, ReplError> {
         let mode = self.current_mode()?;
         let mut state = mode.root_state();
 
         for token in &req.exact_tokens {
             let step = match mode.step(state, token) {
                 Some(step) => step,
-                None => return Ok(Some(Vec::new())),
+                None => return Ok(Vec::new()),
             };
             state = step.next_state;
         }
@@ -343,7 +342,20 @@ impl Repl {
             });
         }
         completions.sort_by(|a, b| a.token.cmp(&b.token));
-        Ok(Some(completions))
+        Ok(completions)
+    }
+
+    fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
+        let req = Self::completion_request_from_prefix(prefix);
+        self.complete_request(&req)
+    }
+
+    fn complete_line(&self, line: &str) -> Result<Option<Vec<CompletionItem>>, ReplError> {
+        let req = match self.parse_completion_request(line) {
+            Some(req) => req,
+            None => return Ok(None),
+        };
+        Ok(Some(self.complete_request(&req)?))
     }
 
     fn apply(&mut self, action: Action) -> Result<Action, ReplError> {
@@ -543,6 +555,13 @@ mod tests {
                 doc: None,
             })
             .collect()
+    }
+
+    fn completion_request(exact_tokens: &[&str], partial: &str) -> CompletionRequest {
+        CompletionRequest {
+            exact_tokens: exact_tokens.iter().map(|token| (*token).to_string()).collect(),
+            partial: partial.to_string(),
+        }
     }
 
     #[test]
@@ -817,6 +836,48 @@ mod tests {
         assert_eq!(
             repl.run_once("bogus ?").unwrap(),
             RunOnceOutcome::Completions(Vec::new())
+        );
+    }
+
+    #[test]
+    fn completion_request_from_prefix_parses_empty_partial_after_whitespace() {
+        assert_eq!(
+            Repl::completion_request_from_prefix("show ip "),
+            completion_request(&["show", "ip"], "")
+        );
+    }
+
+    #[test]
+    fn completion_request_from_prefix_parses_trailing_partial_token() {
+        assert_eq!(
+            Repl::completion_request_from_prefix("show ver"),
+            completion_request(&["show"], "ver")
+        );
+    }
+
+    #[test]
+    fn complete_prefix_matches_root_and_nested_help_queries() {
+        let mut repl = Repl::new();
+        repl.register_mode_command(0, &build_cmd(&["foo"], 0), noop_handler())
+            .unwrap();
+        repl.register_mode_command(0, &build_cmd(&["foo", "bar"], 0), noop_handler())
+            .unwrap();
+        repl.set_command_doc(0, "foo", "foo doc").unwrap();
+        repl.set_edge_doc(0, "foo bar", "bar doc").unwrap();
+
+        assert_eq!(repl.complete_prefix("").unwrap(), completion_items(&["foo"]));
+        assert_eq!(
+            repl.complete_prefix("foo ").unwrap(),
+            vec![
+                CompletionItem {
+                    token: RET_COMPLETION_TOKEN.to_string(),
+                    doc: Some("foo doc".to_string())
+                },
+                CompletionItem {
+                    token: "bar".to_string(),
+                    doc: Some("bar doc".to_string())
+                }
+            ]
         );
     }
 
