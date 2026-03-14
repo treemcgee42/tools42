@@ -19,11 +19,6 @@ impl Mode {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn id(&self) -> ModeId {
-        self.id
-    }
-
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
@@ -40,15 +35,6 @@ impl Mode {
         self.sm.insert_cmd(cmd, command_id)?;
         self.apply_cmd_docs(cmd)?;
         Ok(())
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn next_state(
-        &self,
-        current_state: sm::StateId,
-        input_token: &str,
-    ) -> Option<sm::StateId> {
-        self.sm.next_state(current_state, input_token)
     }
 
     pub(crate) fn step(
@@ -150,6 +136,21 @@ impl Mode {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Mode {
+    pub(crate) fn id(&self) -> ModeId {
+        self.id
+    }
+
+    pub(crate) fn next_state(
+        &self,
+        current_state: sm::StateId,
+        input_token: &str,
+    ) -> Option<sm::StateId> {
+        self.sm.next_state(current_state, input_token)
     }
 }
 

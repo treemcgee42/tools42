@@ -274,13 +274,6 @@ impl Sm {
         })
     }
 
-    /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
-        self.step(current_state, input_token)
-            .map(|step| step.next_state)
-    }
-
     /// Starting at `current_state`, if there is a literal edge for `literal` already, return
     /// the state it points to. Otherwise, create a new edge and state for it.
     pub(crate) fn ensure_literal_edge(
@@ -542,6 +535,15 @@ impl Sm {
         Ok(state.accept.as_ref().and_then(|a| a.doc.as_deref()))
     }
 
+}
+
+#[cfg(test)]
+impl Sm {
+    /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
+    pub(crate) fn next_state(&self, current_state: StateId, input_token: &str) -> Option<StateId> {
+        self.step(current_state, input_token)
+            .map(|step| step.next_state)
+    }
 }
 
 #[cfg(test)]

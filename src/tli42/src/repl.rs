@@ -409,12 +409,6 @@ impl Repl {
         self.get_mode(id)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn current_mode_mut(&mut self) -> Result<&mut mode::Mode, ReplError> {
-        let id = self.current_mode_id()?;
-        self.get_mode_mut(id)
-    }
-
     pub fn add_mode(&mut self, name: impl Into<String>) -> ModeId {
         let id = self.modes.len() as ModeId;
         self.modes.push(mode::Mode::new(id, name));
@@ -631,11 +625,6 @@ impl Repl {
         self.completion_snapshot().complete_request(req)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
-        self.completion_snapshot().complete_prefix(prefix)
-    }
-
     pub(crate) fn completion_snapshot(&self) -> CompletionSnapshot {
         CompletionSnapshot {
             modes: self.modes.clone(),
@@ -849,17 +838,27 @@ impl Repl {
         self.run_with_editor(&mut editor)
     }
 
-    #[cfg(test)]
+}
+
+#[cfg(test)]
+impl Repl {
+    fn current_mode_mut(&mut self) -> Result<&mut mode::Mode, ReplError> {
+        let id = self.current_mode_id()?;
+        self.get_mode_mut(id)
+    }
+
+    fn complete_prefix(&self, prefix: &str) -> Result<Vec<CompletionItem>, ReplError> {
+        self.completion_snapshot().complete_prefix(prefix)
+    }
+
     fn modes_len(&self) -> usize {
         self.modes.len()
     }
 
-    #[cfg(test)]
     fn handlers_len(&self) -> usize {
         self.handlers.len()
     }
 
-    #[cfg(test)]
     fn capture_specs_len(&self) -> usize {
         self.capture_specs.len()
     }
