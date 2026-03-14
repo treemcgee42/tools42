@@ -32,9 +32,7 @@ impl Mode {
         cmd: &cmd::Cmd,
         command_id: sm::CommandId,
     ) -> Result<(), sm::CmdInsertError> {
-        self.sm.insert_cmd(cmd, command_id)?;
-        self.apply_cmd_docs(cmd)?;
-        Ok(())
+        self.sm.insert_cmd(cmd, command_id)
     }
 
     pub(crate) fn step(
@@ -57,7 +55,7 @@ impl Mode {
         &'a self,
         current_state: sm::StateId,
         partial_token: &str,
-    ) -> Vec<(&'a str, Option<&'a str>)> {
+    ) -> Vec<sm::Completion<'a>> {
         self.sm
             .get_completions_with_docs(current_state, partial_token)
     }
@@ -93,50 +91,6 @@ impl Mode {
         self.sm.command_doc_at(state_id)
     }
 
-    fn apply_cmd_docs(&mut self, cmd: &cmd::Cmd) -> Result<(), sm::CmdInsertError> {
-        let mut current_state = self.root_state();
-
-        for atom in cmd.traversal_atoms() {
-            match atom {
-                cmd::TraversalAtom::Literal { token, doc } => {
-                    let next_state = self
-                        .sm
-                        .literal_edge_state(current_state, &token)?
-                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
-                    if let Some(doc) = doc {
-                        let _ = self.sm.set_literal_edge_doc(current_state, &token, doc)?;
-                    }
-                    current_state = next_state;
-                }
-                cmd::TraversalAtom::Var { name, doc } => {
-                    if let Some(doc) = doc {
-                        let completion = format!("<{}>", name.as_deref().unwrap_or("arg"));
-                        let _ = self.sm.set_var_edge_doc(current_state, completion, doc)?;
-                    }
-                    current_state = self
-                        .sm
-                        .var_edge_state(current_state)?
-                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
-                }
-                cmd::TraversalAtom::LabeledVar { label, doc } => {
-                    if let Some(doc) = doc {
-                        let completion = format!("<{}>", label);
-                        let _ = self.sm.set_var_edge_doc(current_state, completion, doc)?;
-                    }
-                    current_state = self
-                        .sm
-                        .var_edge_state(current_state)?
-                        .ok_or(sm::CmdInsertError::InvalidState(current_state))?;
-                }
-            }
-        }
-
-        if let Some(doc) = cmd.command_doc() {
-            let _ = self.sm.set_command_doc(current_state, doc.to_string())?;
-        }
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]

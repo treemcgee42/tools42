@@ -155,22 +155,6 @@ impl CmdBuilder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TraversalAtom {
-    Literal {
-        token: String,
-        doc: Option<String>,
-    },
-    Var {
-        name: Option<String>,
-        doc: Option<String>,
-    },
-    LabeledVar {
-        label: String,
-        doc: Option<String>,
-    },
-}
-
 impl Cmd {
     pub(crate) fn capture_spec(&self) -> Result<Vec<CaptureKind>, CmdSchemaError> {
         let mut capture_spec = Vec::new();
@@ -206,33 +190,6 @@ impl Cmd {
         Ok(capture_spec)
     }
 
-    pub(crate) fn traversal_atoms(&self) -> Vec<TraversalAtom> {
-        let mut atoms = Vec::new();
-        for expr in &self.exprs {
-            match expr {
-                Expr::Sequence(seq) => {
-                    for atom in seq {
-                        match atom {
-                            Atom::Literal { token, doc } => atoms.push(TraversalAtom::Literal {
-                                token: token.clone(),
-                                doc: doc.clone(),
-                            }),
-                            Atom::Var { name, doc } => atoms.push(TraversalAtom::Var {
-                                name: name.clone(),
-                                doc: doc.clone(),
-                            }),
-                            Atom::LabeledVar { label, doc } => atoms.push(TraversalAtom::LabeledVar {
-                                label: label.clone(),
-                                doc: doc.clone(),
-                            }),
-                        }
-                    }
-                }
-            }
-        }
-        atoms
-    }
-
     pub(crate) fn command_doc(&self) -> Option<&str> {
         self.command_doc.as_deref()
     }
@@ -245,8 +202,17 @@ impl sm::Sm {
         atom: &Atom,
     ) -> Result<sm::StateId, sm::CmdInsertError> {
         match atom {
-            Atom::Literal { token, .. } => self.ensure_literal_edge(current_state, token),
-            Atom::Var { .. } | Atom::LabeledVar { .. } => self.ensure_var_edge(current_state),
+            Atom::Literal { token, doc } => {
+                self.ensure_literal_edge(current_state, token, doc.as_deref())
+            }
+            Atom::Var { name, doc } => {
+                let placeholder = format!("<{}>", name.as_deref().unwrap_or("arg"));
+                self.ensure_var_edge(current_state, &placeholder, doc.as_deref())
+            }
+            Atom::LabeledVar { label, doc } => {
+                let placeholder = format!("<{}>", label);
+                self.ensure_var_edge(current_state, &placeholder, doc.as_deref())
+            }
         }
     }
 
@@ -275,7 +241,11 @@ impl sm::Sm {
         for expr in &cmd.exprs {
             current_state = self.insert_expr(current_state, expr)?;
         }
-        self.set_accept(current_state, command_id)
+        self.set_accept(current_state, command_id)?;
+        if let Some(doc) = cmd.command_doc() {
+            let _ = self.set_command_doc(current_state, doc.to_string())?;
+        }
+        Ok(())
     }
 }
 

@@ -30,14 +30,25 @@ const RET_COMPLETION_TOKEN: &str = "RET";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandRegistrationError {
     InvalidState(u32),
-    MultipleVarEdges(u32),
-    DuplicateLiteralEdges {
-        state: u32,
-        literal: String,
-    },
     DuplicateCommandPath {
         existing: CommandId,
         attempted: CommandId,
+    },
+    ConflictingLiteralDoc {
+        state: u32,
+        literal: String,
+        existing: String,
+        attempted: String,
+    },
+    ConflictingVarPlaceholder {
+        state: u32,
+        existing: String,
+        attempted: String,
+    },
+    ConflictingVarDoc {
+        state: u32,
+        existing: String,
+        attempted: String,
     },
     DuplicateLabeledArg {
         label: String,
@@ -63,19 +74,39 @@ impl From<sm::CmdInsertError> for ReplError {
             sm::CmdInsertError::InvalidState(state) => {
                 CommandRegistrationError::InvalidState(state as u32)
             }
-            sm::CmdInsertError::MultipleVarEdges(state) => {
-                CommandRegistrationError::MultipleVarEdges(state as u32)
-            }
-            sm::CmdInsertError::DuplicateLiteralEdges { state, literal } => {
-                CommandRegistrationError::DuplicateLiteralEdges {
-                    state: state as u32,
-                    literal,
-                }
-            }
             sm::CmdInsertError::DuplicateCommandPath {
                 existing,
                 attempted,
             } => CommandRegistrationError::DuplicateCommandPath {
+                existing,
+                attempted,
+            },
+            sm::CmdInsertError::ConflictingLiteralDoc {
+                state,
+                literal,
+                existing,
+                attempted,
+            } => CommandRegistrationError::ConflictingLiteralDoc {
+                state: state as u32,
+                literal,
+                existing,
+                attempted,
+            },
+            sm::CmdInsertError::ConflictingVarPlaceholder {
+                state,
+                existing,
+                attempted,
+            } => CommandRegistrationError::ConflictingVarPlaceholder {
+                state: state as u32,
+                existing,
+                attempted,
+            },
+            sm::CmdInsertError::ConflictingVarDoc {
+                state,
+                existing,
+                attempted,
+            } => CommandRegistrationError::ConflictingVarDoc {
+                state: state as u32,
                 existing,
                 attempted,
             },
@@ -308,9 +339,9 @@ impl CompletionSnapshot {
         let mut completions = mode
             .get_completions_with_docs(state, &req.partial)
             .into_iter()
-            .map(|(token, doc)| CompletionItem {
-                token: token.to_string(),
-                doc: doc.map(str::to_string),
+            .map(|completion| CompletionItem {
+                token: completion.token.to_string(),
+                doc: completion.doc.map(str::to_string),
             })
             .collect::<Vec<_>>();
 

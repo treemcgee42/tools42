@@ -18,8 +18,9 @@ enum Edge {
     /// Inputting a literal string. We do not implement (unique) partial completion
     /// matching at this level; the user of the SM should implement that themselves.
     Literal(String),
-    /// Inputting anything ("variable").
-    Var,
+    /// Inputting anything ("variable"), with a required placeholder used in help
+    /// completion output (e.g. "<name>").
+    Var { placeholder: String },
 }
 
 /// An enriched edge that's more practical to use in the state type. It essentially
@@ -35,11 +36,6 @@ struct EdgeLink {
     /// after the next state, this could document the umbrella all these commands are
     /// grouped under.
     doc: Option<String>,
-    // TODO: should doc and var_completion be unified into a single type?
-    /// A public identifier for the input needed to match this edge. Used in
-    /// conjunction with the documentation. E.g. if we want to accept a variable that
-    /// is the name of the output file, this could be `output-file`.
-    var_completion: Option<String>,
 }
 
 /// Terminal data for a state, e.g. the command and documentation for the command if
@@ -85,6 +81,17 @@ pub(crate) struct StepResult {
     pub(crate) matched: MatchedEdgeKind,
 }
 
+/// Public type used to present a possible completion from e.g. the current state and
+/// input. Essentially describes possible edges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Completion<'a> {
+    /// A single token describing the type. For literal edges, this is the
+    /// literal. For variable edges, this is the placeholder.
+    pub(crate) token: &'a str,
+    /// Documentation for the completion/edge.
+    pub(crate) doc: Option<&'a str>,
+}
+
 /// Result of querying possible transitions, e.g. from a given state and given a
 /// partial input.
 #[derive(Debug, Default)]
@@ -95,15 +102,35 @@ struct ScanResult<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CmdInsertError {
+    /// E.g. tried to insert an edge at a state that doesn't exist.
     InvalidState(StateId),
-    MultipleVarEdges(StateId),
-    DuplicateLiteralEdges {
-        state: StateId,
-        literal: String,
-    },
+    /// Tried to insert a command at a path / state but a different one already
+    /// existed there.
     DuplicateCommandPath {
         existing: CommandId,
         attempted: CommandId,
+    },
+    /// Tried to insert a literal edge but it already existing with a different
+    /// documentation.
+    ConflictingLiteralDoc {
+        state: StateId,
+        literal: String,
+        existing: String,
+        attempted: String,
+    },
+    /// Tried to insert a variable edge but it already existed with a different
+    /// placeholder.
+    ConflictingVarPlaceholder {
+        state: StateId,
+        existing: String,
+        attempted: String,
+    },
+    /// Tried to insert a variable edge but it already existed with a different
+    /// documentation.
+    ConflictingVarDoc {
+        state: StateId,
+        existing: String,
+        attempted: String,
     },
 }
 
@@ -130,7 +157,7 @@ impl Sm {
                         scan.candidates.push(link);
                     }
                 }
-                Edge::Var => scan.candidates.push(link),
+                Edge::Var { .. } => scan.candidates.push(link),
             }
         }
         scan.winner = Self::resolve_winner(&scan.candidates, input_token);
@@ -172,7 +199,7 @@ impl Sm {
                         prefix = None;
                     }
                 }
-                Edge::Var => {
+                Edge::Var { .. } => {
                     var_count += 1;
                     if var_count == 1 {
                         var = Some(*link);
@@ -208,13 +235,9 @@ impl Sm {
         current_state: StateId,
         partial_token: &str,
     ) -> Vec<&'a str> {
-        self.scan_state(current_state, partial_token)
-            .candidates
+        self.get_completions_with_docs(current_state, partial_token)
             .into_iter()
-            .filter_map(|link| match &link.edge {
-                Edge::Literal(token) => Some(token.as_str()),
-                Edge::Var => None,
-            })
+            .map(|completion| completion.token)
             .collect()
     }
 
@@ -222,39 +245,46 @@ impl Sm {
         &'a self,
         current_state: StateId,
         partial_token: &str,
-    ) -> Vec<(&'a str, Option<&'a str>)> {
+    ) -> Vec<Completion<'a>> {
         let scan = self.scan_state(current_state, partial_token);
         // All literal matches (exact and prefix).
         let mut completions = scan
             .candidates
             .iter()
             .filter_map(|link| match &link.edge {
-                Edge::Literal(token) => Some((token.as_str(), link.doc.as_deref())),
-                Edge::Var => None,
+                Edge::Literal(token) => Some(Completion {
+                    token: token.as_str(),
+                    doc: link.doc.as_deref(),
+                }),
+                Edge::Var { .. } => None,
             })
             .collect::<Vec<_>>();
 
-        // TODO: why do we only add var if the partial is empty?
-        if partial_token.is_empty() {
+        // If there is partial input already matching something, then precedence
+        // means we won't match the variable edge anyways so there's no point
+        // displaying it as a completion (and it might mislead the user).
+        if partial_token.is_empty() || completions.is_empty() {
             let mut var = None;
             let mut var_count = 0usize;
             for link in &scan.candidates {
-                if matches!(link.edge, Edge::Var) {
+                if matches!(link.edge, Edge::Var { .. }) {
                     var_count += 1;
-                    if var_count == 1 {
-                        var = Some(*link);
-                    } else {
-                        var = None;
-                    }
+                    var = Some(*link);
                 }
             }
+            assert!(
+                var_count <= 1,
+                "invariant violated: multiple var edges in completion scan"
+            );
 
-            // TODO: isn't it an error to have multiple var? Should we just assert?
             if var_count == 1
                 && let Some(link) = var
-                && let Some(token) = link.var_completion.as_deref()
+                && let Edge::Var { placeholder } = &link.edge
             {
-                completions.push((token, link.doc.as_deref()));
+                completions.push(Completion {
+                    token: placeholder.as_str(),
+                    doc: link.doc.as_deref(),
+                });
             }
         }
 
@@ -269,9 +299,89 @@ impl Sm {
             next_state: winner.next_state,
             matched: match winner.edge {
                 Edge::Literal(_) => MatchedEdgeKind::Literal,
-                Edge::Var => MatchedEdgeKind::Var,
+                Edge::Var { .. } => MatchedEdgeKind::Var,
             },
         })
+    }
+
+    /// Starting at `current_state`, if there is an edge matching `edge` already,
+    /// return the state it points to. Otherwise, create a new edge and state for it.
+    fn ensure_edge(
+        &mut self,
+        current_state: StateId,
+        edge: Edge,
+        doc: Option<&str>,
+    ) -> Result<StateId, CmdInsertError> {
+        let state = self
+            .states
+            .get(current_state)
+            .ok_or(CmdInsertError::InvalidState(current_state))?;
+
+        let mut match_idx: Option<usize> = None;
+        let mut count = 0usize;
+        for (idx, link) in state.edges.iter().enumerate() {
+            let is_match = match (&edge, &link.edge) {
+                (Edge::Literal(target), Edge::Literal(existing)) => target == existing,
+                (Edge::Var { .. }, Edge::Var { .. }) => true,
+                _ => false,
+            };
+            if is_match {
+                count += 1;
+                match_idx = Some(idx);
+            }
+        }
+        assert!(
+            count <= 1,
+            "invariant violated: multiple matching edges in state {} for {:?}",
+            current_state, edge
+        );
+
+        if let Some(idx) = match_idx {
+            let link = &mut self.states[current_state].edges[idx];
+            if let (Edge::Var { placeholder: attempted }, Edge::Var { placeholder: existing }) =
+                (&edge, &link.edge)
+                && existing != attempted
+            {
+                return Err(CmdInsertError::ConflictingVarPlaceholder {
+                    state: current_state,
+                    existing: existing.clone(),
+                    attempted: attempted.clone(),
+                });
+            }
+
+            if let Some(attempted) = doc {
+                if let Some(existing) = link.doc.as_deref() {
+                    if existing != attempted {
+                        return match &edge {
+                            Edge::Literal(literal) => Err(CmdInsertError::ConflictingLiteralDoc {
+                                state: current_state,
+                                literal: literal.clone(),
+                                existing: existing.to_string(),
+                                attempted: attempted.to_string(),
+                            }),
+                            Edge::Var { .. } => Err(CmdInsertError::ConflictingVarDoc {
+                                state: current_state,
+                                existing: existing.to_string(),
+                                attempted: attempted.to_string(),
+                            }),
+                        };
+                    }
+                } else {
+                    link.doc = Some(attempted.to_string());
+                }
+            }
+
+            return Ok(link.next_state);
+        }
+
+        let next_state = self.states.len();
+        self.states.push(State::default());
+        self.states[current_state].edges.push(EdgeLink {
+            edge,
+            next_state,
+            doc: doc.map(str::to_string),
+        });
+        Ok(next_state)
     }
 
     /// Starting at `current_state`, if there is a literal edge for `literal` already, return
@@ -280,44 +390,9 @@ impl Sm {
         &mut self,
         current_state: StateId,
         literal: &str,
+        doc: Option<&str>,
     ) -> Result<StateId, CmdInsertError> {
-        let state = self
-            .states
-            .get(current_state)
-            .ok_or(CmdInsertError::InvalidState(current_state))?;
-
-        let mut existing: Option<StateId> = None;
-        let mut literal_count = 0usize;
-        for link in &state.edges {
-            if let Edge::Literal(existing_literal) = &link.edge
-                && existing_literal == literal
-            {
-                literal_count += 1;
-                if literal_count == 1 {
-                    existing = Some(link.next_state);
-                }
-            }
-        }
-
-        if literal_count > 1 {
-            return Err(CmdInsertError::DuplicateLiteralEdges {
-                state: current_state,
-                literal: literal.to_string(),
-            });
-        }
-        if let Some(state_id) = existing {
-            return Ok(state_id);
-        }
-
-        let new_state = self.states.len();
-        self.states.push(State::default());
-        self.states[current_state].edges.push(EdgeLink {
-            edge: Edge::Literal(literal.to_string()),
-            next_state: new_state,
-            doc: None,
-            var_completion: None,
-        });
-        Ok(new_state)
+        self.ensure_edge(current_state, Edge::Literal(literal.to_string()), doc)
     }
 
     /// Starting at `current_state`, if there is a var edge return the state it points to. Otherwise,
@@ -325,39 +400,16 @@ impl Sm {
     pub(crate) fn ensure_var_edge(
         &mut self,
         current_state: StateId,
+        placeholder: &str,
+        doc: Option<&str>,
     ) -> Result<StateId, CmdInsertError> {
-        let state = self
-            .states
-            .get(current_state)
-            .ok_or(CmdInsertError::InvalidState(current_state))?;
-
-        let mut existing: Option<StateId> = None;
-        let mut var_count = 0usize;
-        for link in &state.edges {
-            if matches!(link.edge, Edge::Var) {
-                var_count += 1;
-                if var_count == 1 {
-                    existing = Some(link.next_state);
-                }
-            }
-        }
-
-        if var_count > 1 {
-            return Err(CmdInsertError::MultipleVarEdges(current_state));
-        }
-        if let Some(state_id) = existing {
-            return Ok(state_id);
-        }
-
-        let new_state = self.states.len();
-        self.states.push(State::default());
-        self.states[current_state].edges.push(EdgeLink {
-            edge: Edge::Var,
-            next_state: new_state,
-            doc: None,
-            var_completion: None,
-        });
-        Ok(new_state)
+        self.ensure_edge(
+            current_state,
+            Edge::Var {
+                placeholder: placeholder.to_string(),
+            },
+            doc,
+        )
     }
 
     pub(crate) fn set_accept(
@@ -408,12 +460,12 @@ impl Sm {
             if let Edge::Literal(existing_literal) = &link.edge
                 && existing_literal == literal
             {
-                if match_idx.is_some() {
-                    return Err(CmdInsertError::DuplicateLiteralEdges {
-                        state: current_state,
-                        literal: literal.to_string(),
-                    });
-                }
+                assert!(
+                    match_idx.is_none(),
+                    "invariant violated: duplicate literal edge '{}' in state {}",
+                    literal,
+                    current_state
+                );
                 match_idx = Some(idx);
             }
         }
@@ -423,58 +475,6 @@ impl Sm {
             return Ok(true);
         }
         Ok(false)
-    }
-
-    pub(crate) fn literal_edge_state(
-        &self,
-        current_state: StateId,
-        literal: &str,
-    ) -> Result<Option<StateId>, CmdInsertError> {
-        let state = self
-            .states
-            .get(current_state)
-            .ok_or(CmdInsertError::InvalidState(current_state))?;
-
-        let mut found = None;
-        for link in &state.edges {
-            if let Edge::Literal(existing_literal) = &link.edge
-                && existing_literal == literal
-            {
-                if found.is_some() {
-                    return Err(CmdInsertError::DuplicateLiteralEdges {
-                        state: current_state,
-                        literal: literal.to_string(),
-                    });
-                }
-                found = Some(link.next_state);
-            }
-        }
-
-        Ok(found)
-    }
-
-    pub(crate) fn var_edge_state(&self, current_state: StateId) -> Result<Option<StateId>, CmdInsertError> {
-        let state = self
-            .states
-            .get(current_state)
-            .ok_or(CmdInsertError::InvalidState(current_state))?;
-
-        let mut found = None;
-        let mut count = 0usize;
-        for link in &state.edges {
-            if matches!(link.edge, Edge::Var) {
-                count += 1;
-                if count == 1 {
-                    found = Some(link.next_state);
-                }
-            }
-        }
-
-        if count > 1 {
-            return Err(CmdInsertError::MultipleVarEdges(current_state));
-        }
-
-        Ok(found)
     }
 
     pub(crate) fn set_command_doc(
@@ -491,40 +491,6 @@ impl Sm {
         };
         accept.doc = Some(doc);
         Ok(true)
-    }
-
-    pub(crate) fn set_var_edge_doc(
-        &mut self,
-        current_state: StateId,
-        completion: String,
-        doc: String,
-    ) -> Result<bool, CmdInsertError> {
-        let state = self
-            .states
-            .get_mut(current_state)
-            .ok_or(CmdInsertError::InvalidState(current_state))?;
-
-        let mut match_idx: Option<usize> = None;
-        let mut var_count = 0usize;
-        for (idx, link) in state.edges.iter().enumerate() {
-            if matches!(link.edge, Edge::Var) {
-                var_count += 1;
-                if var_count == 1 {
-                    match_idx = Some(idx);
-                }
-            }
-        }
-
-        if var_count > 1 {
-            return Err(CmdInsertError::MultipleVarEdges(current_state));
-        }
-
-        if let Some(idx) = match_idx {
-            state.edges[idx].var_completion = Some(completion);
-            state.edges[idx].doc = Some(doc);
-            return Ok(true);
-        }
-        Ok(false)
     }
 
     pub(crate) fn command_doc_at(&self, state_id: StateId) -> Result<Option<&str>, CmdInsertError> {
@@ -555,16 +521,16 @@ mod tests {
             edge: Edge::Literal(s.to_string()),
             next_state,
             doc: None,
-            var_completion: None,
         }
     }
 
     fn var_edge(next_state: StateId) -> EdgeLink {
         EdgeLink {
-            edge: Edge::Var,
+            edge: Edge::Var {
+                placeholder: "<arg>".to_string(),
+            },
             next_state,
             doc: None,
-            var_completion: None,
         }
     }
 
@@ -592,19 +558,29 @@ mod tests {
     fn get_completions_with_docs_includes_var_placeholder_when_available() {
         let sm = sm_with_states(vec![State {
             edges: vec![EdgeLink {
-                edge: Edge::Var,
+                edge: Edge::Var {
+                    placeholder: "<name>".to_string(),
+                },
                 next_state: 1,
                 doc: Some("account name".to_string()),
-                var_completion: Some("<name>".to_string()),
             }],
             accept: None,
         }]);
 
         assert_eq!(
             sm.get_completions_with_docs(0, ""),
-            vec![("<name>", Some("account name"))]
+            vec![Completion {
+                token: "<name>",
+                doc: Some("account name")
+            }]
         );
-        assert!(sm.get_completions_with_docs(0, "na").is_empty());
+        assert_eq!(
+            sm.get_completions_with_docs(0, "na"),
+            vec![Completion {
+                token: "<name>",
+                doc: Some("account name")
+            }]
+        );
     }
 
     #[test]
@@ -749,8 +725,8 @@ mod tests {
             State::default(),
         ]);
 
-        let first = sm.ensure_literal_edge(0, "show").unwrap();
-        let second = sm.ensure_literal_edge(0, "show").unwrap();
+        let first = sm.ensure_literal_edge(0, "show", None).unwrap();
+        let second = sm.ensure_literal_edge(0, "show", None).unwrap();
 
         assert_eq!(first, 1);
         assert_eq!(second, 1);
@@ -767,12 +743,78 @@ mod tests {
             State::default(),
         ]);
 
-        let first = sm.ensure_var_edge(0).unwrap();
-        let second = sm.ensure_var_edge(0).unwrap();
+        let first = sm.ensure_var_edge(0, "<arg>", None).unwrap();
+        let second = sm.ensure_var_edge(0, "<arg>", None).unwrap();
 
         assert_eq!(first, 1);
         assert_eq!(second, 1);
         assert_eq!(sm.states[0].edges.len(), 1);
+    }
+
+    #[test]
+    fn ensure_literal_edge_rejects_conflicting_doc() {
+        let mut sm = sm_with_states(vec![
+            State {
+                edges: vec![lit_edge("show", 1)],
+                accept: None,
+            },
+            State::default(),
+        ]);
+        sm.states[0].edges[0].doc = Some("old".to_string());
+
+        let err = sm.ensure_literal_edge(0, "show", Some("new")).unwrap_err();
+        assert_eq!(
+            err,
+            CmdInsertError::ConflictingLiteralDoc {
+                state: 0,
+                literal: "show".to_string(),
+                existing: "old".to_string(),
+                attempted: "new".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ensure_var_edge_rejects_conflicting_placeholder() {
+        let mut sm = sm_with_states(vec![
+            State {
+                edges: vec![var_edge(1)],
+                accept: None,
+            },
+            State::default(),
+        ]);
+
+        let err = sm.ensure_var_edge(0, "<name>", None).unwrap_err();
+        assert_eq!(
+            err,
+            CmdInsertError::ConflictingVarPlaceholder {
+                state: 0,
+                existing: "<arg>".to_string(),
+                attempted: "<name>".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn ensure_var_edge_rejects_conflicting_doc() {
+        let mut sm = sm_with_states(vec![
+            State {
+                edges: vec![var_edge(1)],
+                accept: None,
+            },
+            State::default(),
+        ]);
+        sm.states[0].edges[0].doc = Some("old".to_string());
+
+        let err = sm.ensure_var_edge(0, "<arg>", Some("new")).unwrap_err();
+        assert_eq!(
+            err,
+            CmdInsertError::ConflictingVarDoc {
+                state: 0,
+                existing: "old".to_string(),
+                attempted: "new".to_string()
+            }
+        );
     }
 
     #[test]
@@ -796,11 +838,11 @@ mod tests {
         let mut sm = Sm::new();
 
         assert_eq!(
-            sm.ensure_literal_edge(99, "show").unwrap_err(),
+            sm.ensure_literal_edge(99, "show", None).unwrap_err(),
             CmdInsertError::InvalidState(99)
         );
         assert_eq!(
-            sm.ensure_var_edge(99).unwrap_err(),
+            sm.ensure_var_edge(99, "<arg>", None).unwrap_err(),
             CmdInsertError::InvalidState(99)
         );
         assert_eq!(
