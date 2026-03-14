@@ -1,24 +1,76 @@
+//! This module contains the data structure for the REPL command position. We use
+//! something like a state machine or DFA. The "state" is where the user currently is
+//! in the command graph. It is represented by `State` and referenced by
+//! `StateId`. Movement to another state is only possible through an "edge", which
+//! represents the action the user must take, e.g. what they must type, in order to
+//! reach the next state. Any state may also be terminal, in the sense that stopping
+//! at the current state represents a valid command.
+
 pub(crate) type StateId = usize;
 pub(crate) type CommandId = u32;
 
+// TODO: do we check coherence during construction?
+/// Criterion to move from one state to another. Note that a collection of edges for
+/// a state is not automatically coherent; e.g. it does not make sense to have
+/// multiple `Var` edges as they could both match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Edge {
+    /// Inputting a literal string. We do not implement (unique) partial completion
+    /// matching at this level; the user of the SM should implement that themselves.
     Literal(String),
+    /// Inputting anything ("variable").
     Var,
 }
 
+/// An enriched edge that's more practical to use in the state type. It essentially
+/// groups associated data and metadata for an edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EdgeLink {
     edge: Edge,
     next_state: StateId,
+    // TODO: how do we reconcile the documentation of the edge to a terminal with
+    // the documentation of the terminal's command itself?
+    /// Optional documentation. For instance, if `next_state` is terminal this could
+    /// describe the command at that state. If there are multiple possible commands
+    /// after the next state, this could document the umbrella all these commands are
+    /// grouped under.
     doc: Option<String>,
+    // TODO: should doc and var_completion be unified into a single type?
+    /// A public identifier for the input needed to match this edge. Used in
+    /// conjunction with the documentation. E.g. if we want to accept a variable that
+    /// is the name of the output file, this could be `output-file`.
     var_completion: Option<String>,
 }
 
+/// Terminal data for a state, e.g. the command and documentation for the command if
+/// the SM is exited at a given state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AcceptMeta {
     command_id: CommandId,
     doc: Option<String>,
+}
+
+/// Represents a state in the SM graph / DFA.
+#[derive(Debug, Clone, Default)]
+struct State {
+    /// All possible ways to advance the state. Note the edges should be coherent
+    /// (see documentation there).
+    edges: Vec<EdgeLink>,
+    /// If provided, this state is a "terminal" and exiting here means e.g. invoking
+    /// the enclosed command.
+    accept: Option<AcceptMeta>,
+}
+
+/// Represents the SM / DFA. It is pretty much stateless after construction; it is up
+/// to the user of this type to store the "current state". Transitions between
+/// states, e.g. via the `step` method, simply return what the next state would be,
+/// and it is up to the user to decide what to do with this (e.g. set that to their
+/// current state).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Sm {
+    /// List of states in the SM. The index is a stable identifier; we currently do
+    /// not support reordering. The initial state is at index 0.
+    states: Vec<State>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,18 +85,8 @@ pub(crate) struct StepResult {
     pub(crate) matched: MatchedEdgeKind,
 }
 
-#[derive(Debug, Clone, Default)]
-struct State {
-    edges: Vec<EdgeLink>,
-    accept: Option<AcceptMeta>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub(crate) struct Sm {
-    // Initial state is 0.
-    states: Vec<State>,
-}
-
+/// Result of querying possible transitions, e.g. from a given state and given a
+/// partial input.
 #[derive(Debug, Default)]
 struct StateScan<'a> {
     exact_literal: Option<StateId>,
@@ -171,7 +213,9 @@ impl Sm {
             .unwrap_or_default()
     }
 
-    /// Returns the chosen edge kind + next state under CLI abbreviation rules.
+    /// Returns the chosen edge kind + next state under CLI abbreviation rules. The
+    /// precedence order is literal, prefix, variable. So a literal match trumps
+    /// everything and a prefix match trumps a variable match.
     pub(crate) fn step(&self, current_state: StateId, input_token: &str) -> Option<StepResult> {
         let scan = self.scan_state(current_state, input_token, false)?;
 
