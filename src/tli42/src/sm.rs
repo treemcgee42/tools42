@@ -88,17 +88,9 @@ pub(crate) struct StepResult {
 /// Result of querying possible transitions, e.g. from a given state and given a
 /// partial input.
 #[derive(Debug, Default)]
-struct StateScan<'a> {
-    exact_literal: Option<StateId>,
-    exact_literal_count: usize,
-    exact_literal_doc: Option<&'a str>,
-    prefix_literal: Option<StateId>,
-    prefix_literal_count: usize,
-    prefix_literal_doc: Option<&'a str>,
-    var_match: Option<StateId>,
-    var_match_count: usize,
-    var_completion: Option<(&'a str, Option<&'a str>)>,
-    completions: Vec<(&'a str, Option<&'a str>)>,
+struct ScanResult<'a> {
+    candidates: Vec<&'a EdgeLink>,
+    winner: Option<&'a EdgeLink>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,62 +114,92 @@ impl Sm {
         }
     }
 
-    fn scan_state<'a>(
-        &'a self,
-        current_state: StateId,
-        input_token: &str,
-        collect_completions: bool,
-    ) -> Option<StateScan<'a>> {
-        let state = self.states.get(current_state)?;
-        let mut scan = StateScan::default();
+    /// Determine the completions and winner from the current state given the input
+    /// token.
+    fn scan_state<'a>(&'a self, current_state: StateId, input_token: &str) -> ScanResult<'a> {
+        let state = self
+            .states
+            .get(current_state)
+            .expect("invalid state id in SM");
+        let mut scan = ScanResult::default();
 
         for link in &state.edges {
             match &link.edge {
                 Edge::Literal(complete_token) => {
-                    let edge_doc = link.doc.as_deref();
-                    if collect_completions && complete_token.starts_with(input_token) {
-                        scan.completions.push((complete_token.as_str(), edge_doc));
-                    }
-
-                    if complete_token == input_token {
-                        scan.exact_literal_count += 1;
-                        if scan.exact_literal_count == 1 {
-                            scan.exact_literal = Some(link.next_state);
-                            scan.exact_literal_doc = edge_doc;
-                        } else {
-                            scan.exact_literal = None;
-                            scan.exact_literal_doc = None;
-                        }
-                    }
-
                     if complete_token.starts_with(input_token) {
-                        scan.prefix_literal_count += 1;
-                        if scan.prefix_literal_count == 1 {
-                            scan.prefix_literal = Some(link.next_state);
-                            scan.prefix_literal_doc = edge_doc;
-                        } else {
-                            scan.prefix_literal = None;
-                            scan.prefix_literal_doc = None;
-                        }
+                        scan.candidates.push(link);
+                    }
+                }
+                Edge::Var => scan.candidates.push(link),
+            }
+        }
+        scan.winner = Self::resolve_winner(&scan.candidates, input_token);
+
+        scan
+    }
+
+    /// Given a list of completion candidates for the input token, determine the one that should be
+    /// chosen to advance on. This uses the following precedence rules, in descending order:
+    /// - exact match
+    /// - prefix match
+    /// - variable match
+    ///
+    /// If there are multiple matches of the same precedence, or else we cannot
+    /// determine a clear winner, we return `None`.
+    fn resolve_winner<'a>(candidates: &[&'a EdgeLink], input_token: &str) -> Option<&'a EdgeLink> {
+        let mut exact = None;
+        let mut exact_count = 0usize;
+        let mut prefix = None;
+        let mut prefix_count = 0usize;
+        let mut var = None;
+        let mut var_count = 0usize;
+
+        for link in candidates {
+            match &link.edge {
+                Edge::Literal(token) if token == input_token => {
+                    exact_count += 1;
+                    if exact_count == 1 {
+                        exact = Some(*link);
+                    } else {
+                        exact = None;
+                    }
+                }
+                Edge::Literal(_) => {
+                    prefix_count += 1;
+                    if prefix_count == 1 {
+                        prefix = Some(*link);
+                    } else {
+                        prefix = None;
                     }
                 }
                 Edge::Var => {
-                    scan.var_match_count += 1;
-                    if scan.var_match_count == 1 {
-                        scan.var_match = Some(link.next_state);
-                        scan.var_completion = link
-                            .var_completion
-                            .as_deref()
-                            .map(|token| (token, link.doc.as_deref()));
+                    var_count += 1;
+                    if var_count == 1 {
+                        var = Some(*link);
                     } else {
-                        scan.var_match = None;
-                        scan.var_completion = None;
+                        var = None;
                     }
                 }
             }
         }
 
-        Some(scan)
+        if exact_count == 1 {
+            return exact;
+        }
+        if exact_count > 1 {
+            return None;
+        }
+        if prefix_count == 1 {
+            return prefix;
+        }
+        if prefix_count > 1 {
+            return None;
+        }
+        if var_count == 1 {
+            return var;
+        }
+
+        None
     }
 
     /// Get a list of all possible next literal tokens.
@@ -186,14 +208,14 @@ impl Sm {
         current_state: StateId,
         partial_token: &str,
     ) -> Vec<&'a str> {
-        self.scan_state(current_state, partial_token, true)
-            .map(|scan| {
-                scan.completions
-                    .into_iter()
-                    .map(|(token, _)| token)
-                    .collect::<Vec<_>>()
+        self.scan_state(current_state, partial_token)
+            .candidates
+            .into_iter()
+            .filter_map(|link| match &link.edge {
+                Edge::Literal(token) => Some(token.as_str()),
+                Edge::Var => None,
             })
-            .unwrap_or_default()
+            .collect()
     }
 
     pub(crate) fn get_completions_with_docs<'a>(
@@ -201,52 +223,55 @@ impl Sm {
         current_state: StateId,
         partial_token: &str,
     ) -> Vec<(&'a str, Option<&'a str>)> {
-        self.scan_state(current_state, partial_token, true)
-            .map(|mut scan| {
-                if partial_token.is_empty() {
-                    if let Some(var_completion) = scan.var_completion {
-                        scan.completions.push(var_completion);
+        let scan = self.scan_state(current_state, partial_token);
+        // All literal matches (exact and prefix).
+        let mut completions = scan
+            .candidates
+            .iter()
+            .filter_map(|link| match &link.edge {
+                Edge::Literal(token) => Some((token.as_str(), link.doc.as_deref())),
+                Edge::Var => None,
+            })
+            .collect::<Vec<_>>();
+
+        // TODO: why do we only add var if the partial is empty?
+        if partial_token.is_empty() {
+            let mut var = None;
+            let mut var_count = 0usize;
+            for link in &scan.candidates {
+                if matches!(link.edge, Edge::Var) {
+                    var_count += 1;
+                    if var_count == 1 {
+                        var = Some(*link);
+                    } else {
+                        var = None;
                     }
                 }
-                scan.completions
-            })
-            .unwrap_or_default()
+            }
+
+            // TODO: isn't it an error to have multiple var? Should we just assert?
+            if var_count == 1
+                && let Some(link) = var
+                && let Some(token) = link.var_completion.as_deref()
+            {
+                completions.push((token, link.doc.as_deref()));
+            }
+        }
+
+        completions
     }
 
-    /// Returns the chosen edge kind + next state under CLI abbreviation rules. The
-    /// precedence order is literal, prefix, variable. So a literal match trumps
-    /// everything and a prefix match trumps a variable match.
+    /// Returns the chosen edge kind + next state under CLI abbreviation rules.
     pub(crate) fn step(&self, current_state: StateId, input_token: &str) -> Option<StepResult> {
-        let scan = self.scan_state(current_state, input_token, false)?;
-
-        if scan.exact_literal_count == 1 {
-            return scan.exact_literal.map(|next_state| StepResult {
-                next_state,
-                matched: MatchedEdgeKind::Literal,
-            });
-        }
-        if scan.exact_literal_count > 1 {
-            return None;
-        }
-
-        if scan.prefix_literal_count == 1 {
-            return scan.prefix_literal.map(|next_state| StepResult {
-                next_state,
-                matched: MatchedEdgeKind::Literal,
-            });
-        }
-        if scan.prefix_literal_count > 1 {
-            return None;
-        }
-
-        if scan.var_match_count == 1 {
-            return scan.var_match.map(|next_state| StepResult {
-                next_state,
-                matched: MatchedEdgeKind::Var,
-            });
-        }
-
-        None
+        let scan = self.scan_state(current_state, input_token);
+        let winner = scan.winner?;
+        Some(StepResult {
+            next_state: winner.next_state,
+            matched: match winner.edge {
+                Edge::Literal(_) => MatchedEdgeKind::Literal,
+                Edge::Var => MatchedEdgeKind::Var,
+            },
+        })
     }
 
     /// Returns the next state if input_token resolves uniquely under CLI abbreviation rules.
@@ -680,11 +705,10 @@ mod tests {
     }
 
     #[test]
-    fn invalid_state_returns_none_and_empty_completions() {
+    #[should_panic(expected = "invalid state id in SM")]
+    fn invalid_state_panics() {
         let sm = sm_with_states(vec![State::default()]);
-
-        assert_eq!(sm.next_state(9, "show"), None);
-        assert!(sm.get_completions(9, "sh").is_empty());
+        let _ = sm.next_state(9, "show");
     }
 
     #[test]
