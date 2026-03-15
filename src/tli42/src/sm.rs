@@ -412,6 +412,8 @@ impl Sm {
         )
     }
 
+    /// Register a command to be accepted if input terminates at `state_id`. This
+    /// makes `state_id` a terminal State.
     pub(crate) fn set_accept(
         &mut self,
         state_id: StateId,
@@ -422,7 +424,7 @@ impl Sm {
             .get_mut(state_id)
             .ok_or(CmdInsertError::InvalidState(state_id))?;
 
-        if let Some(existing) = &state.accept {
+        if let Some(existing) = &state.accept && existing.command_id != id {
             return Err(CmdInsertError::DuplicateCommandPath {
                 existing: existing.command_id,
                 attempted: id,
@@ -436,6 +438,7 @@ impl Sm {
         Ok(())
     }
 
+    /// Returns the command, if any, at `state_id`.
     pub(crate) fn accept_at(&self, state_id: StateId) -> Result<Option<CommandId>, CmdInsertError> {
         let state = self
             .states
@@ -444,6 +447,10 @@ impl Sm {
         Ok(state.accept.as_ref().map(|a| a.command_id))
     }
 
+    /// Set the documentation for a given literal edge at `current_state`. This is
+    /// useful when there's a command stem with multiple commands behind it and you
+    /// want to document that commonality. Rather than writing the documentation at
+    /// that point during each command insertion, you can do it once.
     pub(crate) fn set_literal_edge_doc(
         &mut self,
         current_state: StateId,
@@ -477,6 +484,8 @@ impl Sm {
         Ok(false)
     }
 
+    /// Set the documentation for the command at `state_id`. If there is no command
+    /// there, return false. Otherwise set it and return true.
     pub(crate) fn set_command_doc(
         &mut self,
         state_id: StateId,
@@ -493,6 +502,7 @@ impl Sm {
         Ok(true)
     }
 
+    /// Get the command documentation at `state_id`, if any.
     pub(crate) fn command_doc_at(&self, state_id: StateId) -> Result<Option<&str>, CmdInsertError> {
         let state = self
             .states

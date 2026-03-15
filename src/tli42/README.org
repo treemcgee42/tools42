@@ -15,3 +15,11 @@ The classic solution to this is of course a REPL. Indeed we often work with shel
 inside their REPL.
 
 tli42 is a tool to help users create REPLs as easily as they might create a CLI.
+
+* Architecture
+
+** REPL
+
+The REPL is modeled as a state machine / DFA, where the states are where the user can
+be and the edges represent the valid inputs to transition from one state to another.
+The core of this is in the `sm` module.
